@@ -27,8 +27,8 @@ All of this runs in **parallel** — scoring happens in the background while the
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     Claude Code CLI                         │
-│              /resume  /tailor-resume  /cover-letter         │
+│             Claude Code / Claude Cowork                      │
+│     /resume  /tailor-resume  /cover-letter  /setup          │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────┐  │
@@ -40,9 +40,9 @@ All of this runs in **parallel** — scoring happens in the background while the
 │       └──────────────┴─────────────┘               │        │
 │                      │                             │        │
 │              ┌───────┴───────┐              ┌──────┴─────┐  │
-│              │ Scorer Server │              │   DOCX     │  │
-│              │  (FastAPI)    │              │ Generator  │  │
-│              │  :8100        │              │ (Workday)  │  │
+│              │  MCP Server   │              │   DOCX     │  │
+│              │ (auto-starts) │              │ Generator  │  │
+│              │  FastMCP 3.0  │              │ (Workday)  │  │
 │              └───────────────┘              └────────────┘  │
 │                                                             │
 ├─────────────────────────────────────────────────────────────┤
@@ -94,27 +94,53 @@ Claude-powered rubric evaluation that catches nuances the algorithmic scorers mi
 
 ## Getting Started
 
-### Prerequisites
+### Quick Start — 3 Steps
 
-- **Python 3.10+**
-- **Claude Code** ([install guide](https://docs.anthropic.com/en/docs/claude-code))
-- **Anthropic API Key** (for LLM scoring — [get one here](https://console.anthropic.com/))
+Works with **Claude Code** (CLI/IDE) and **Claude Cowork** (web).
 
-### Option A: Install as Claude Code Plugin (Recommended)
+**Step 1: Install the plugin**
 
 ```bash
-# Add the marketplace and install
+# In Claude Code or Cowork
 /plugin marketplace add jananthan30/Resume-Builder
 /plugin install resume-builder
 ```
 
-Then install Python dependencies in the plugin directory:
-```bash
-pip install -r requirements.txt
-python -c "import nltk; nltk.download('wordnet'); nltk.download('punkt_tab')"
+**Step 2: Run the setup wizard**
+
+```
+/resume-builder:setup
 ```
 
-### Option B: Clone & Run Locally
+This walks you through everything:
+- Checks if Python is installed (tells you where to download it if not)
+- Installs all dependencies automatically (`pip install -r requirements.txt`)
+- Creates your `config.json` with your name, email, phone, LinkedIn
+- Optionally sets up the LLM scorer (Claude API key)
+
+**Step 3: Start building resumes**
+
+```
+/resume-builder:resume [paste a job description here]
+```
+
+That's it. The plugin handles scoring, iteration, DOCX generation, and tracking.
+
+### What Works Without Setup
+
+Even before running `/resume-builder:setup`, these commands work immediately (they're just Claude prompts — no Python needed):
+
+| Command | Works immediately? | With setup? |
+|---------|-------------------|-------------|
+| `/resume-builder:resume` | Yes — Claude writes the resume | + automated ATS/HR scoring and DOCX output |
+| `/resume-builder:cover-letter` | Yes — Claude writes the letter | + DOCX output |
+| `/resume-builder:writing-coach` | Yes — full writing audit | Same |
+| `/resume-builder:setup` | Yes — runs the setup wizard | N/A |
+| MCP scoring tools | No — needs Python | score_ats, score_hr, score_both, score_llm, score_combined |
+
+### Alternative: Clone & Run Locally
+
+If you prefer not to use the plugin system:
 
 ```bash
 # Clone the repository
@@ -124,7 +150,7 @@ cd Resume-Builder
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Download NLTK data (one-time setup)
+# Download NLTK data (one-time)
 python -c "import nltk; nltk.download('wordnet'); nltk.download('punkt_tab')"
 
 # Copy config templates
@@ -132,26 +158,11 @@ cp .env.example .env
 cp config.example.json config.json
 ```
 
-### Configuration
+Then edit `.env` (API key) and `config.json` (your info), and use the commands without the `resume-builder:` prefix (e.g., `/resume` instead of `/resume-builder:resume`).
 
-**1. Set your API key** in `.env`:
-```env
-ANTHROPIC_API_KEY=sk-ant-your-key-here
-```
+### Your Master Resume
 
-**2. Set your info** in `config.json`:
-```json
-{
-  "master_resume_path": "YOUR_MASTER_RESUME.md",
-  "output_base_dir": "applications",
-  "user_name": "Your Name",
-  "user_email": "your.email@example.com",
-  "user_phone": "555-123-4567",
-  "user_linkedin": "linkedin.com/in/your-profile"
-}
-```
-
-**3. Create your master resume** as a Markdown file. This is the single source of truth that all tailored resumes are generated from. Use this format:
+Create a Markdown file with your complete work history. This is the single source of truth — all tailored resumes are generated from it:
 
 ```markdown
 FULL NAME, CREDENTIALS
@@ -177,30 +188,33 @@ CERTIFICATIONS
 • Certification Name – Issuing Body
 ```
 
+Set the path to this file in your `config.json` as `master_resume_path`.
+
 ---
 
 ## Usage
 
-### Option 1: Claude Code Slash Commands (Recommended)
+### Workflow Order
 
-This is the primary way to use the tool. Open Claude Code in the project directory and use:
-
-```bash
-# Full application package (resume + cover letter + scoring + tracking)
-/resume [paste the full job description here]
-
-# Resume only (no cover letter)
-/tailor-resume [paste the full job description here]
-
-# Cover letter only
-/cover-letter [paste the full job description here]
-
-# Batch process multiple job descriptions
-/batch-resume
-
-# Improve writing quality of an existing resume
-/writing-coach path/to/resume.md
 ```
+1. /resume-builder:setup          One-time setup (install deps, create config)
+2. Create your master resume       YOUR_MASTER_RESUME.md with full work history
+3. /resume-builder:resume [JD]    Paste a job description — get a full application
+4. /resume-builder:writing-coach   Optional — audit and improve writing quality
+```
+
+### Slash Commands
+
+| Command | What It Does |
+|---------|-------------|
+| `/resume-builder:setup` | One-time setup wizard (installs Python deps, creates config) |
+| `/resume-builder:resume [JD]` | Full application: tailored resume + cover letter + scoring + DOCX + tracking |
+| `/resume-builder:tailor-resume [JD]` | Resume only (no cover letter) |
+| `/resume-builder:cover-letter [JD]` | Cover letter only |
+| `/resume-builder:batch-resume` | Process multiple job descriptions in parallel |
+| `/resume-builder:writing-coach [file]` | Audit and rewrite resume bullets using 10 writing rules |
+
+If running locally (cloned repo), use short names: `/resume`, `/tailor-resume`, etc.
 
 Each command runs a multi-phase parallel workflow:
 - **Phase 1:** Parallel research (reads master resume, finds best match, sets up output folder)
@@ -252,21 +266,38 @@ python hr_scorer.py --score resume.pdf job_description.txt --web
 
 ---
 
-## Claude Code Plugin — How It Works
+## Claude Code / Cowork Plugin — How It Works
 
-This project ships as a **Claude Code plugin** via custom slash commands in `.claude/commands/`. When you clone this repo and open Claude Code inside it, you get five commands:
+This project ships as a **Claude Code and Cowork plugin** with 6 slash commands + 5 MCP scoring tools. It works in Claude Code (CLI/IDE) and Claude Cowork (web).
 
-| Command | File | What It Does |
-|---------|------|--------------|
-| `/resume` | `.claude/commands/resume.md` | Full application package with Swarm v3.0 parallel execution |
-| `/tailor-resume` | `.claude/commands/tailor-resume.md` | Resume-only tailoring with dual scoring |
-| `/cover-letter` | `.claude/commands/cover-letter.md` | Standalone cover letter generation |
-| `/batch-resume` | `.claude/commands/batch-resume.md` | Batch process multiple JDs in parallel |
-| `/writing-coach` | `.claude/commands/writing-coach.md` | Resume writing quality audit (10 rules) |
+### Slash Commands (6)
 
-### How Claude Code Commands Work
+| Command | What It Does |
+|---------|-------------|
+| `/resume-builder:setup` | One-time setup wizard |
+| `/resume-builder:resume` | Full application package with Swarm v3.0 parallel execution |
+| `/resume-builder:tailor-resume` | Resume-only tailoring with dual scoring |
+| `/resume-builder:cover-letter` | Standalone cover letter generation |
+| `/resume-builder:batch-resume` | Batch process multiple JDs in parallel |
+| `/resume-builder:writing-coach` | Resume writing quality audit (10 rules) |
 
-Claude Code supports [custom slash commands](https://docs.anthropic.com/en/docs/claude-code/tutorials#create-custom-slash-commands) — Markdown files in `.claude/commands/` that define complex, multi-step workflows. When you type `/resume` in Claude Code, it loads the corresponding `.md` file as a prompt template, replacing `$ARGUMENTS` with whatever you typed after the command.
+### MCP Scoring Tools (5)
+
+After running `/resume-builder:setup`, the MCP scorer auto-starts and provides these tools that Claude can call natively:
+
+| Tool | What It Does |
+|------|-------------|
+| `score_ats` | ATS keyword + semantic scoring (7 components) |
+| `score_hr` | HR recruiter simulation (6 factors + F-pattern) |
+| `score_both` | ATS + HR combined in one call |
+| `score_llm` | Claude-augmented scoring (requires API key) |
+| `score_combined` | All 3 blended (70% rules / 30% LLM) |
+
+### How It Works Under the Hood
+
+The plugin uses slash commands (Markdown files in `commands/`) that define complex, multi-step workflows. When you type `/resume-builder:resume` followed by a job description, it loads the prompt template and `$ARGUMENTS` gets replaced with your input.
+
+The MCP server (`mcp_scorer.py`) auto-starts via `.mcp.json` when the plugin loads, exposing scoring functions as native tools that Claude can call directly — no manual server startup needed.
 
 These commands turn Claude into a specialized resume optimization agent that:
 - Reads your master resume and the target job description
@@ -295,12 +326,19 @@ The `/writing-coach` command applies these writing rules to every bullet point:
 
 ```
 Resume-Builder/
-├── .claude/commands/           # Claude Code slash commands (the plugin)
+├── .claude-plugin/             # Plugin manifest
+│   └── plugin.json             # Plugin metadata (name, version, author)
+├── commands/                   # Slash commands (plugin format)
+│   ├── setup.md                # One-time setup wizard
 │   ├── resume.md               # Full application (Swarm v3.0)
 │   ├── tailor-resume.md        # Resume only
 │   ├── cover-letter.md         # Cover letter only
 │   ├── batch-resume.md         # Batch processing
-│   └── writing-coach.md        # Writing enhancement
+│   └── writing-coach.md        # Writing enhancement (10 rules)
+├── hooks/                      # Plugin hooks
+│   └── hooks.json              # SessionStart: checks if scoring is ready
+├── .mcp.json                   # MCP server config (auto-starts scorer)
+├── mcp_scorer.py               # MCP scoring server (5 tools via FastMCP)
 ├── data/                       # Reference databases for scoring
 │   ├── keywords_*.json         # Domain-specific keyword databases (6 domains)
 │   ├── skill_taxonomy.json     # Skill categories with decay constants
@@ -311,12 +349,12 @@ Resume-Builder/
 ├── ats_scorer.py               # ATS scoring engine (2,800+ lines)
 ├── hr_scorer.py                # HR scoring engine (2,900+ lines)
 ├── llm_scorer.py               # Claude-powered rubric scorer
-├── scorer_server.py            # FastAPI REST API for scoring
+├── scorer_server.py            # FastAPI REST API for scoring (standalone)
 ├── docx_generator.py           # ATS/Workday-compliant DOCX generator
 ├── orchestration_state.py      # Multi-agent state management (DAG)
 ├── tracker_utils.py            # Excel application tracker utilities
 ├── resume_builder.py           # CLI entry point
-├── requirements.txt            # Python dependencies
+├── requirements.txt            # Python dependencies (including fastmcp)
 ├── config.example.json         # Config template
 ├── .env.example                # Environment variable template
 ├── CLAUDE.md                   # Project context for Claude Code
@@ -394,12 +432,13 @@ When running the scorer server (`python scorer_server.py --port 8100`):
 
 | Component | Technology |
 |-----------|------------|
-| AI Agent Framework | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) |
+| AI Agent Framework | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) / [Claude Cowork](https://claude.ai) |
 | LLM | [Claude](https://www.anthropic.com/claude) (Anthropic) |
+| MCP Server | [FastMCP 3.0](https://gofastmcp.com/) (auto-starts with plugin) |
 | Embeddings | [Sentence Transformers](https://sbert.net/) (all-MiniLM-L6-v2) |
 | NLP | NLTK (lemmatization), TextStat (readability) |
 | Search | BM25Plus (rank-bm25), NetworkX (skill graphs) |
-| API Server | FastAPI + Uvicorn |
+| API Server | FastAPI + Uvicorn (standalone mode) |
 | Document Generation | python-docx |
 | PDF Parsing | pdfplumber |
 | Tracking | openpyxl (Excel) |
