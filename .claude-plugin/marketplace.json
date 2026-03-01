@@ -1,0 +1,15 @@
+{
+  "name": "resume-builder-marketplace",
+  "owner": {
+    "name": "Jananthan Paramsothy",
+    "email": "jananthan30@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "resume-builder",
+      "source": ".",
+      "description": "AI-powered resume & cover letter generator with dual ATS + HR scoring. Works for any profession — software engineers, marketers, lawyers, finance, healthcare, and more.",
+      "version": "1.0.0"
+    }
+  ]
+}

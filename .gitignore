@@ -1,0 +1,94 @@
+# ========================
+# Personal / Sensitive Data
+# ========================
+.env
+config.json
+JANANTHAN_PARAMSOTHY_MASTER_RESUME.md
+JANANTHAN_PARAMSOTHY_MASTER_RESUME.docx
+JANANTHAN PARAMSOTHY_RESUME 2025.pdf
+yale_transcript.txt
+Job_Application_Tracker.xlsx
+~$*.docx
+
+# ========================
+# Generated Applications (contain personal resumes/cover letters)
+# ========================
+applications/
+
+# ========================
+# Cache & Build Artifacts
+# ========================
+embed_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ========================
+# IDE / Editor
+# ========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ========================
+# OS Files
+# ========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+nul
+
+# ========================
+# Logs & Temp
+# ========================
+*.log
+.temp_data.json
+_temp_data.json
+test.json
+test_resume.docx
+
+# ========================
+# Unrelated / personal documents
+# ========================
+Biweekly Survey Questions*.docx
+HeallyConnect_Survey*.docx
+
+# ========================
+# Client-specific batch scripts (contain personal data)
+# ========================
+create_docs.py
+generate_docs_*.py
+generate_kymera_docs.py
+
+# ========================
+# Claude / AI Agent State (transient)
+# ========================
+.claude/memory/
+.playwright-mcp/
+
+# ========================
+# Gemini commands (mirror of Claude commands — not needed for public)
+# ========================
+.gemini/
+
+# ========================
+# Batch Job Descriptions (user-specific)
+# ========================
+batch_jds/
+
+# ========================
+# Internal planning docs (not part of the tool)
+# ========================
+Deepresearch.md
+MARKETING_PLAN.md
+SAAS_PLAN.md
+IMPLEMENTATION_PLAN.md
+ATS & HR Scorer Enhancement Research.txt

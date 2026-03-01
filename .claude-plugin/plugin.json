@@ -1,0 +1,28 @@
+{
+  "name": "resume-builder",
+  "description": "AI-powered resume and cover letter generator with dual ATS + HR scoring optimization. Tailors applications to job descriptions using parallel agent execution, auto-detects 6+ professional domains, and produces Workday-compatible DOCX output.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Jananthan Paramsothy",
+    "email": "jananthan30@gmail.com",
+    "url": "https://github.com/jananthan30"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/jananthan30/Resume-Builder",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jananthan30/Resume-Builder.git"
+  },
+  "keywords": [
+    "resume",
+    "cover-letter",
+    "ats",
+    "job-application",
+    "career",
+    "hiring",
+    "scoring",
+    "docx",
+    "workday",
+    "parallel-agents"
+  ]
+}
