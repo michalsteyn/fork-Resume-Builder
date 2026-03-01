@@ -2,8 +2,8 @@
   "mcpServers": {
     "resume-scorer": {
       "command": "python",
-      "args": ["mcp_scorer.py"],
-      "cwd": "."
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp_scorer.py"],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}"
     }
   }
 }

@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import fastmcp, ats_scorer, hr_scorer; print('resume-builder: Scoring engine ready')\" 2>/dev/null || echo 'resume-builder: Scoring engine not set up. Run /resume-builder:setup to enable ATS/HR scoring.'"
+          }
+        ]
+      }
+    ]
+  }
+}
