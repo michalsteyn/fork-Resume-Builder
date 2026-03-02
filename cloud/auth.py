@@ -296,7 +296,7 @@ def get_usage_count(user_id: int) -> int:
 
 def check_usage_allowed(user_id: int, tier: str) -> bool:
     """Check if user is within their tier limits."""
-    if tier == "pro":
+    if tier in ("pro", "ultra"):
         return True
     # Free tier: limited total scores
     count = get_usage_count(user_id)
@@ -317,11 +317,13 @@ def get_usage_stats(user_id: int) -> Dict[str, Any]:
             (user_id, today),
         ).fetchone()["cnt"]
 
+    user_tier = get_user_by_id(user_id).get("tier", "free")
+    is_paid = user_tier in ("pro", "ultra")
     return {
         "total_scores": total,
         "today_scores": today_count,
-        "tier_limit": None if get_user_by_id(user_id).get("tier") == "pro" else settings.FREE_TIER_TOTAL_LIMIT,
-        "remaining": None if get_user_by_id(user_id).get("tier") == "pro" else max(0, settings.FREE_TIER_TOTAL_LIMIT - total),
+        "tier_limit": None if is_paid else settings.FREE_TIER_TOTAL_LIMIT,
+        "remaining": None if is_paid else max(0, settings.FREE_TIER_TOTAL_LIMIT - total),
     }
 
 

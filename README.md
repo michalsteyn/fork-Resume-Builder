@@ -172,7 +172,7 @@ Then edit `.env` (API key) and `config.json` (your info), and use the commands w
 
 ### Cloud Scoring (Optional)
 
-The scoring API is hosted at `https://resume-scorer.fly.dev`. Free users get **5 scored resumes**. To enable cloud scoring:
+The scoring API is hosted at `https://resume-scorer.fly.dev`. Free users get **5 scored resumes**. Sign up or upgrade at [resume-scorer-web.streamlit.app](https://resume-scorer-web.streamlit.app). To enable cloud scoring:
 
 1. **Register** for an API key:
 ```bash
@@ -263,7 +263,7 @@ Each command runs a multi-phase parallel workflow:
 
 ### Option 2: Cloud Scoring API
 
-Use the hosted API at `https://resume-scorer.fly.dev` — no local setup required:
+Use the hosted API at `https://resume-scorer.fly.dev` — no local setup required. Or use the web app at [resume-scorer-web.streamlit.app](https://resume-scorer-web.streamlit.app):
 
 ```bash
 # Register and get your API key

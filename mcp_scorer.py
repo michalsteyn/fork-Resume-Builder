@@ -58,6 +58,9 @@ except ImportError:
     CLOUD_AVAILABLE = False
 
 
+UPGRADE_URL = "https://resume-scorer-web.streamlit.app"
+
+
 def _try_cloud(endpoint: str, resume_text: str, jd_text: str, extra: dict = None):
     """Try cloud API first. Returns result dict or None."""
     if not CLOUD_AVAILABLE:
@@ -66,6 +69,21 @@ def _try_cloud(endpoint: str, resume_text: str, jd_text: str, extra: dict = None
         return cloud_score(endpoint, resume_text, jd_text, extra)
     except Exception:
         return None
+
+
+def _is_usage_limit(result: dict) -> bool:
+    """Check if a cloud result is a usage limit error."""
+    return isinstance(result, dict) and result.get("_error") == "usage_limit"
+
+
+def _usage_limit_response(result: dict) -> dict:
+    """Format a user-friendly usage limit message."""
+    return {
+        "error": "free_tier_limit_reached",
+        "message": result.get("_message", "You've used all 5 free scores."),
+        "upgrade": f"Upgrade to Pro ($12/mo) for unlimited scoring at {UPGRADE_URL}",
+        "tip": "Or set up local scoring by installing dependencies: pip install sentence-transformers nltk",
+    }
 
 
 # ─── Lazy-load local scorers (SBERT takes ~5s on first call) ──────────────
@@ -106,6 +124,8 @@ def score_resume(resume_text: str, jd_text: str) -> dict:
         matched/missing keywords, HR recommendation, and detailed breakdowns.
     """
     cloud_result = _try_cloud("/score/both", resume_text, jd_text)
+    if _is_usage_limit(cloud_result):
+        return _usage_limit_response(cloud_result)
     if cloud_result and "ats" in cloud_result:
         return cloud_result
 
@@ -156,6 +176,8 @@ def score_ats(resume_text: str, jd_text: str) -> dict:
         readability analysis, format risk flags, and component breakdowns.
     """
     cloud_result = _try_cloud("/score/ats", resume_text, jd_text)
+    if _is_usage_limit(cloud_result):
+        return _usage_limit_response(cloud_result)
     if cloud_result and "total_score" in cloud_result:
         return cloud_result
 
@@ -185,6 +207,8 @@ def score_hr(resume_text: str, jd_text: str) -> dict:
         factor breakdown, strengths, concerns, and interview questions.
     """
     cloud_result = _try_cloud("/score/hr", resume_text, jd_text)
+    if _is_usage_limit(cloud_result):
+        return _usage_limit_response(cloud_result)
     if cloud_result and "overall_score" in cloud_result:
         return cloud_result
 
@@ -279,6 +303,8 @@ def explain_score(resume_text: str, jd_text: str) -> dict:
         improvement priorities, and specific suggestions.
     """
     cloud_result = _try_cloud("/explain", resume_text, jd_text)
+    if _is_usage_limit(cloud_result):
+        return _usage_limit_response(cloud_result)
     if cloud_result and "explanation" in cloud_result:
         return cloud_result
 

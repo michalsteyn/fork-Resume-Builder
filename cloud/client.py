@@ -73,6 +73,17 @@ def cloud_score(
                 return result
 
         except HTTPError as e:
+            if e.code == 402:
+                # Free tier limit exceeded — return error so caller can show upgrade prompt
+                try:
+                    body = json.loads(e.read().decode("utf-8"))
+                except Exception:
+                    body = {}
+                return {
+                    "_error": "usage_limit",
+                    "_message": body.get("detail", "Free tier limit reached (5 scores). Upgrade to Pro for unlimited scoring."),
+                    "_upgrade_url": "https://resume-scorer-web.streamlit.app",
+                }
             if e.code in (401, 403):
                 # Auth error — don't retry
                 return None
