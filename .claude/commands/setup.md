@@ -69,9 +69,23 @@ If yes:
 
 If no, skip this step. The rules-based ATS and HR scorers work without an API key.
 
-### Step 5: (Optional) Connect Pro/Ultra Account
+### Step 5: (Optional) Connect Pro Account for Unlimited Scoring
 
-Ask the user: "Do you have a Pro or Ultra account on the Resume Scorer web app?"
+Explain to the user:
+
+```
+Since you're using Claude Code or Claude.ai, your Anthropic subscription
+already handles resume writing and cover letters.
+
+The scorer server only does the ATS + HR scoring — so Pro ($12/mo) is
+all you need. You do NOT need Ultra; that's for users of the web app
+who need AI writing through the server too.
+
+Without a Pro key: you get 5 free cloud scores, then local scoring kicks in.
+With a Pro key: unlimited cloud scoring.
+```
+
+Ask: "Would you like to connect a Pro account for unlimited cloud scoring?"
 
 If YES:
 1. Tell them:
@@ -88,10 +102,10 @@ If YES:
    SCORER_CLOUD_API_KEY=<their key>
    ```
    Use the Write or Edit tool to add these lines to the `.env` file in the project folder.
-4. Confirm: "Your Pro/Ultra account is now linked. The plugin will use your cloud account for all scoring."
+4. Confirm: "Your Pro account is now linked. The plugin will use your cloud account for unlimited scoring."
 
 If NO or SKIP:
-- The plugin uses free cloud scoring (5 scores total) then falls back to local scoring.
+- The plugin uses 5 free cloud scores, then automatically falls back to local scoring.
 - They can always run `/setup` again later to add the key.
 
 ### Step 6: Verify

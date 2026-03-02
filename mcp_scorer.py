@@ -110,20 +110,24 @@ def _usage_limit_message(result: dict) -> str:
         return (
             "☁️  Free cloud scoring limit reached (5 scores).\n\n"
             "✅  Local scoring is available on this machine — switching to local mode now.\n\n"
-            "To unlock unlimited cloud scoring:\n"
-            "  • Upgrade to Pro at " + UPGRADE_URL + "\n"
-            "  • Then run /setup — Claude will link your account automatically."
+            "To unlock unlimited cloud scoring, upgrade to Pro ($12/mo):\n"
+            "  • Claude Code / Claude.ai users: Pro is all you need.\n"
+            "    Scoring is done by the server; resume writing is done by your\n"
+            "    existing Anthropic subscription — no need for Ultra.\n"
+            "  • Sign up at " + UPGRADE_URL + ", then run /setup to link your account."
         )
     return (
         "☁️  Free cloud scoring limit reached (5 scores).\n\n"
         "You have two options:\n\n"
-        "Option A — Upgrade to Pro ($12/mo, unlimited):\n"
+        "Option A — Pro plan ($12/mo, unlimited scoring):\n"
+        "  • Perfect for Claude Code / Claude.ai users — scoring only.\n"
+        "    Your Anthropic subscription handles resume writing; Pro handles scoring.\n"
         "  1. Sign up at " + UPGRADE_URL + "\n"
         "  2. Dashboard → 'Claude Code Plugin Setup' → Generate API Key\n"
-        "  3. Run /setup — Claude will save the key for you\n\n"
-        "Option B — Free local scoring (no internet needed):\n"
+        "  3. Run /setup — Claude will save the key automatically\n\n"
+        "Option B — Free local scoring (no subscription needed):\n"
         "  Run /setup — Claude will install the required packages\n"
-        "  (requires Python + ~500MB for the ML models)"
+        "  (requires Python + ~500MB for the ML models, works offline)"
     )
 
 
