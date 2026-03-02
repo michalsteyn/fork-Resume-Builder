@@ -348,6 +348,172 @@ def analyze_resume_for_search(resume_text: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Domain-Aware Job Filtering
+# ---------------------------------------------------------------------------
+
+# Keyword signals per domain — matched against job title + short description
+_DOMAIN_SIGNALS: Dict[str, set] = {
+    "molecular_biology": {
+        "molecular biology", "molecular biologist", "biochemistry", "cell biology",
+        "genomics", "proteomics", "pcr", "western blot", "flow cytometry", "crispr",
+        "sequencing", "gene expression", "tissue culture", "wet lab", "bench science",
+        "laboratory scientist", "research scientist", "assay development", "fermentation",
+        "cell culture", "immunology", "microbiology", "virology", "neuroscience",
+    },
+    "data_science": {
+        "data scientist", "machine learning", "ml engineer", "data engineer",
+        "analytics engineer", "data analyst", "ai engineer", "deep learning",
+        "nlp engineer", "computer vision", "data science", "data mining",
+        "business intelligence", "bi analyst", "quantitative researcher",
+    },
+    "software_engineering": {
+        "software engineer", "software developer", "backend engineer", "frontend engineer",
+        "full stack", "devops engineer", "platform engineer", "site reliability engineer",
+        "sre", "mobile developer", "ios developer", "android developer", "web developer",
+        "cloud engineer", "infrastructure engineer", "systems engineer",
+    },
+    "clinical_research": {
+        "clinical research", "clinical trial", "clinical research associate", "cra",
+        "clinical research coordinator", "crc", "clinical monitor", "study coordinator",
+        "research coordinator", "regulatory affairs", "pharmacovigilance", "drug safety",
+        "medical monitor", "clinical operations", "clinical project manager",
+    },
+    "finance": {
+        "investment banking", "portfolio manager", "quantitative analyst", "quant analyst",
+        "financial analyst", "risk analyst", "credit analyst", "equity research",
+        "asset management", "hedge fund manager", "trader", "fixed income",
+        "derivatives analyst", "private equity", "venture capital",
+    },
+}
+
+# If resume domain is key → jobs detected in these domains are incompatible
+_INCOMPATIBLE_DOMAINS: Dict[str, set] = {
+    "molecular_biology": {"data_science", "software_engineering", "finance"},
+    "data_science": {"molecular_biology"},
+    "software_engineering": {"molecular_biology", "clinical_research", "finance"},
+    "clinical_research": {"data_science", "software_engineering", "finance"},
+    "finance": {"molecular_biology", "clinical_research", "software_engineering"},
+}
+
+
+def _detect_text_domain(text: str) -> Optional[str]:
+    """Detect domain from text using keyword signals. Returns domain key or None."""
+    text_lower = text.lower()
+    scores: Dict[str, int] = {}
+    for domain, signals in _DOMAIN_SIGNALS.items():
+        score = sum(1 for s in signals if s in text_lower)
+        if score > 0:
+            scores[domain] = score
+    if not scores:
+        return None
+    return max(scores, key=scores.__getitem__)
+
+
+def _normalize_domain(domain_str: str) -> Optional[str]:
+    """Map a free-text domain description (from AI analysis) to a domain key."""
+    if not domain_str:
+        return None
+    d = domain_str.lower()
+    if any(k in d for k in ("molecular", "biochem", "cell bio", "genomic", "virol", "microbi", "immunol", "neurosci")):
+        return "molecular_biology"
+    if any(k in d for k in ("data sci", "machine learn", "ml ", "artificial intel", "nlp", "analytics")):
+        return "data_science"
+    if any(k in d for k in ("software", "web dev", "backend", "frontend", "devops", "platform eng", "cloud eng")):
+        return "software_engineering"
+    if any(k in d for k in ("clinical", "trial", "cra", "crc", "regulatory", "pharmacovig", "drug safety")):
+        return "clinical_research"
+    if any(k in d for k in ("financ", "banking", "invest", "portfolio", "quant", "hedge fund", "private equity")):
+        return "finance"
+    return None
+
+
+def _ai_domain_filter(
+    candidates: List[Dict[str, Any]],
+    resume_domain: str,
+) -> List[Dict[str, Any]]:
+    """
+    Use Claude Haiku to filter out jobs from incompatible domains in one batch call.
+    Returns the filtered list. Falls back to all candidates if the API call fails.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key or not candidates:
+        return candidates
+
+    model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+
+    job_list = "\n".join(
+        f"{i}: {job['title']} at {job.get('company', 'Unknown')}"
+        for i, job in enumerate(candidates)
+    )
+
+    prompt = (
+        f"The candidate's resume domain is: '{resume_domain}'.\n\n"
+        f"Job listings (index: title at company):\n{job_list}\n\n"
+        "Return a JSON array of indices to KEEP — jobs that are plausibly relevant "
+        "for someone with this background. Remove ONLY jobs that are clearly in a "
+        "completely different field (e.g., data scientist or software engineer jobs for "
+        "a molecular biologist). When in doubt, KEEP the job. "
+        "Return ONLY a JSON array of integers, e.g. [0,1,3,5]. No explanation."
+    )
+
+    payload = json.dumps({
+        "model": model,
+        "max_tokens": 150,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        raw = data["content"][0]["text"].strip()
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
+        keep_indices = set(json.loads(raw))
+        filtered = [job for i, job in enumerate(candidates) if i in keep_indices]
+        # Safety: if AI filtered >60% of candidates, trust heuristic instead
+        if len(filtered) < len(candidates) * 0.4:
+            return candidates
+        return filtered
+    except Exception:
+        return candidates  # Fail open
+
+
+def _heuristic_domain_filter(
+    candidates: List[Dict[str, Any]],
+    resume_domain_key: str,
+) -> List[Dict[str, Any]]:
+    """
+    Heuristic domain filter: detect each job's domain from title+description,
+    remove jobs whose domain is incompatible with the resume domain.
+    """
+    blocked_domains = _INCOMPATIBLE_DOMAINS.get(resume_domain_key, set())
+    if not blocked_domains:
+        return candidates
+
+    filtered = []
+    for job in candidates:
+        job_text = f"{job.get('title', '')} {job.get('description', '')[:300]}"
+        job_domain = _detect_text_domain(job_text)
+        if job_domain and job_domain in blocked_domains:
+            continue
+        filtered.append(job)
+
+    # Safety: if we removed >60% of candidates, filtering is too aggressive — return all
+    if len(filtered) < len(candidates) * 0.4:
+        return candidates
+    return filtered
+
+
+# ---------------------------------------------------------------------------
 # Main Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -446,6 +612,23 @@ def discover_jobs(
 
     all_jobs.sort(key=lambda j: j["_title_sim"], reverse=True)
     candidates = all_jobs[:20]
+
+    # --- Step 2b: Domain relevance filter ---
+    # Determine resume domain (from AI analysis if available, else heuristic)
+    resume_domain_str = ai_analysis.get("domain", "") if ai_analysis else ""
+    resume_domain_key = _normalize_domain(resume_domain_str)
+    if not resume_domain_key:
+        # Heuristic detection from resume text when no AI analysis was run
+        resume_domain_key = _detect_text_domain(resume_text[:2000])
+
+    if resume_domain_key:
+        if os.getenv("ANTHROPIC_API_KEY", ""):
+            # One-shot AI batch filter — fast, one API call for all candidates
+            domain_label = resume_domain_str or resume_domain_key.replace("_", " ")
+            candidates = _ai_domain_filter(candidates, domain_label)
+        else:
+            # No API key: keyword-based heuristic filter
+            candidates = _heuristic_domain_filter(candidates, resume_domain_key)
 
     # --- Step 3: Lightweight score all candidates ---
     for job in candidates:
