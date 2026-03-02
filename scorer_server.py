@@ -1294,17 +1294,30 @@ async def score_combined(req: ScoreRequest, api_key: str = Depends(verify_api_ke
 @app.post("/rewrite")
 async def rewrite_resume_endpoint(req: ScoreRequest, auth=Depends(verify_api_key_with_usage)):
     """
-    Ultra tier: Rewrite resume to match JD, return before/after scores.
-    Requires 'ultra' tier subscription.
+    Rewrite resume to match JD, return before/after scores.
+    Pro tier: 10 rewrites/month. Ultra tier: unlimited.
     """
-    # Enforce ultra tier
+    # Enforce tier + rewrite limits
     if CLOUD_AVAILABLE and isinstance(auth, dict):
         tier = auth.get("tier", "free")
-        if tier != "ultra":
+        user_id = auth.get("user_id")
+        if tier not in ("pro", "ultra"):
             raise HTTPException(
                 status_code=403,
-                detail="Resume rewriting requires an Ultra subscription ($29/month).",
+                detail="Resume rewriting requires a Pro ($12/month) or Ultra ($29/month) subscription.",
             )
+        # Pro users: check monthly rewrite limit
+        if tier == "pro" and user_id:
+            try:
+                from cloud.auth import check_rewrite_allowed
+                rewrite_status = check_rewrite_allowed(user_id, tier)
+                if not rewrite_status["allowed"]:
+                    raise HTTPException(
+                        status_code=429,
+                        detail=f"Monthly rewrite limit reached ({rewrite_status['limit']}/month for Pro). Upgrade to Ultra for unlimited rewrites.",
+                    )
+            except ImportError:
+                pass  # Local mode — no limits
 
     resume_text, jd_text, resume_file_path = resolve_inputs(req)
     _log_score_usage(auth, "/rewrite")

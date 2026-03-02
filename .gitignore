@@ -99,6 +99,8 @@ Resume Builder Plugin Industry Research.txt
 # Cloud / Billing / Deployment (private — not for public repo)
 # ========================
 cloud/
+!cloud/__init__.py
+!cloud/client.py
 Dockerfile
 docker-compose.yml
 fly.toml
