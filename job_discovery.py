@@ -351,25 +351,29 @@ def analyze_resume_for_search(resume_text: str) -> Dict[str, Any]:
 # Domain-Aware Job Filtering
 # ---------------------------------------------------------------------------
 
-# Keyword signals per domain — matched against job title + short description
+# Keyword signals per domain — use ROLE TITLE terms only (not generic tech terms)
+# to avoid false positives when a professional uses ML/data tools in another domain
 _DOMAIN_SIGNALS: Dict[str, set] = {
     "molecular_biology": {
-        "molecular biology", "molecular biologist", "biochemistry", "cell biology",
-        "genomics", "proteomics", "pcr", "western blot", "flow cytometry", "crispr",
-        "sequencing", "gene expression", "tissue culture", "wet lab", "bench science",
-        "laboratory scientist", "research scientist", "assay development", "fermentation",
-        "cell culture", "immunology", "microbiology", "virology", "neuroscience",
+        "molecular biologist", "biochemist", "cell biologist",
+        "genomics scientist", "proteomics", "pcr technician", "western blot",
+        "flow cytometry", "crispr scientist", "sequencing scientist",
+        "gene expression", "tissue culture", "wet lab scientist", "bench scientist",
+        "laboratory scientist biology", "assay development scientist",
+        "cell culture scientist", "immunologist", "microbiologist", "virologist",
     },
     "data_science": {
-        "data scientist", "machine learning", "ml engineer", "data engineer",
-        "analytics engineer", "data analyst", "ai engineer", "deep learning",
-        "nlp engineer", "computer vision", "data science", "data mining",
-        "business intelligence", "bi analyst", "quantitative researcher",
+        "data scientist", "ml engineer", "data engineer",
+        "analytics engineer", "data analyst", "ai engineer",
+        "nlp engineer", "computer vision engineer", "data science manager",
+        "machine learning engineer", "data mining analyst",
+        "business intelligence analyst", "bi developer", "quantitative researcher",
     },
     "software_engineering": {
         "software engineer", "software developer", "backend engineer", "frontend engineer",
-        "full stack", "devops engineer", "platform engineer", "site reliability engineer",
-        "sre", "mobile developer", "ios developer", "android developer", "web developer",
+        "full stack developer", "devops engineer", "platform engineer",
+        "site reliability engineer", "sre", "mobile developer",
+        "ios developer", "android developer", "web developer",
         "cloud engineer", "infrastructure engineer", "systems engineer",
     },
     "clinical_research": {
@@ -377,12 +381,15 @@ _DOMAIN_SIGNALS: Dict[str, set] = {
         "clinical research coordinator", "crc", "clinical monitor", "study coordinator",
         "research coordinator", "regulatory affairs", "pharmacovigilance", "drug safety",
         "medical monitor", "clinical operations", "clinical project manager",
+        "physician", "medical officer", "health informatics", "irb", "gcp compliance",
+        "safety monitoring", "medical director", "principal investigator",
+        "clinical data manager", "redcap", "medidata", "emr", "ehr",
     },
     "finance": {
         "investment banking", "portfolio manager", "quantitative analyst", "quant analyst",
-        "financial analyst", "risk analyst", "credit analyst", "equity research",
-        "asset management", "hedge fund manager", "trader", "fixed income",
-        "derivatives analyst", "private equity", "venture capital",
+        "financial analyst", "risk analyst", "credit analyst", "equity research analyst",
+        "asset management", "hedge fund", "fixed income analyst",
+        "derivatives trader", "private equity analyst", "venture capital analyst",
     },
 }
 
