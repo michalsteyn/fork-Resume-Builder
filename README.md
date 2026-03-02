@@ -146,7 +146,7 @@ Even before running `/resume-builder:setup`, these commands work immediately (th
 | `/resume-builder:cover-letter` | Yes — Claude writes the letter | + DOCX output |
 | `/resume-builder:writing-coach` | Yes — full writing audit | Same |
 | `/resume-builder:setup` | Yes — runs the setup wizard | N/A |
-| MCP scoring tools | No — needs Python | score_ats, score_hr, score_both, score_llm, score_combined |
+| MCP scoring tools | No — needs Python | score_resume, score_ats, score_hr, score_with_llm, rewrite_resume, explain_score, extract_text |
 
 ### Alternative: Clone & Run Locally
 
@@ -317,7 +317,7 @@ python hr_scorer.py --score resume.pdf job_description.txt --web
 
 ## Claude Code / Cowork Plugin — How It Works
 
-This project ships as a **Claude Code and Cowork plugin** with 6 slash commands + 5 MCP scoring tools. It works in Claude Code (CLI/IDE) and Claude Cowork (web).
+This project ships as a **Claude Code and Cowork plugin** with 6 slash commands + 7 MCP tools. It works in Claude Code (CLI/IDE) and Claude Cowork (web).
 
 ### Slash Commands (6)
 
@@ -330,17 +330,18 @@ This project ships as a **Claude Code and Cowork plugin** with 6 slash commands 
 | `/resume-builder:batch-resume` | Batch process multiple JDs in parallel |
 | `/resume-builder:writing-coach` | Resume writing quality audit (10 rules) |
 
-### MCP Scoring Tools (5)
+### MCP Tools (7)
 
 After running `/resume-builder:setup`, the MCP scorer auto-starts and provides these tools that Claude can call natively:
 
 | Tool | What It Does |
 |------|-------------|
+| `score_resume` | Full ATS + HR analysis in one call (recommended) |
 | `score_ats` | ATS keyword + semantic scoring (8 components) |
 | `score_hr` | HR recruiter simulation (6 factors + F-pattern) |
-| `score_both` | ATS + HR combined in one call |
-| `score_llm` | Claude-augmented scoring (requires API key) |
-| `score_combined` | All 3 blended (70% rules / 30% LLM) |
+| `score_with_llm` | Claude-augmented rubric scoring (requires ANTHROPIC_API_KEY) |
+| `rewrite_resume` | AI-powered resume tailoring to match a JD (requires ANTHROPIC_API_KEY) |
+| `explain_score` | Actionable improvement suggestions with missing keywords |
 | `extract_text` | Extract text from DOCX/PDF/MD/TXT files |
 
 All MCP tools support **cloud-first scoring** — they try the cloud API first and fall back to local scoring automatically. See [Cloud Scoring](#cloud-scoring-optional) for setup.
@@ -352,13 +353,12 @@ The `.mcp.json` file configures the MCP server to auto-start with Claude Code:
 ```json
 {
   "mcpServers": {
-    "resume-scorer": {
+    "ai-resume-tuner": {
       "command": "python",
       "args": ["mcp_scorer.py"],
       "cwd": "/path/to/Resume-Builder",
       "env": {
-        "SCORER_CLOUD_URL": "https://resume-scorer.fly.dev",
-        "SCORER_CLOUD_API_KEY": "rb_your_api_key_here"
+        "SCORER_CLOUD_URL": "https://resume-scorer.fly.dev"
       }
     }
   }
@@ -370,7 +370,7 @@ The `.mcp.json` file configures the MCP server to auto-start with Claude Code:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `SCORER_CLOUD_URL` | No | `https://resume-scorer.fly.dev` | Cloud scoring API URL |
-| `SCORER_CLOUD_API_KEY` | No | — | Your cloud API key (`rb_...`). Cloud scoring is disabled without this. |
+| `SCORER_CLOUD_API_KEY` | No | — | Your cloud API key (`rb_...`). Anonymous scoring (5 free) works without this. |
 | `ANTHROPIC_API_KEY` | No | — | For LLM scoring (always runs locally with your key) |
 | `ANTHROPIC_MODEL` | No | `claude-sonnet-4-6` | Claude model for LLM scoring |
 
@@ -425,12 +425,7 @@ Resume-Builder/
 ├── hooks/                      # Plugin hooks
 │   └── hooks.json              # SessionStart: checks if scoring is ready
 ├── .mcp.json                   # MCP server config (auto-starts scorer)
-├── mcp_scorer.py               # MCP scoring server (6 tools, cloud-first thin client)
-├── cloud/                      # Cloud API infrastructure (not in public repo)
-│   ├── config.py               # Environment-based settings
-│   ├── auth.py                 # JWT + SQLite auth and usage tracking
-│   ├── billing.py              # Stripe subscription management
-│   └── client.py               # HTTP client for cloud-first MCP scoring
+├── mcp_scorer.py               # MCP scoring server (7 tools, cloud-first thin client)
 ├── data/                       # Reference databases for scoring
 │   ├── keywords_*.json         # Domain-specific keyword databases (6 domains)
 │   ├── skill_taxonomy.json     # Skill categories with decay constants
@@ -542,7 +537,7 @@ Scoring endpoints accept authentication via:
 - **JWT Bearer token:** `Authorization: Bearer <token>` (from `/auth/login`)
 - **API key:** `X-API-Key: rb_...` (from `/auth/api-key`)
 
-Free tier: **5 total scores**. Pro tier: **unlimited** (Stripe subscription).
+Free tier: **5 total scores**. Pro tier ($12/mo): **unlimited scoring + LLM analysis**. Ultra tier ($29/mo): **unlimited + AI resume rewriting**.
 
 ### Example: Score a Resume
 
@@ -588,7 +583,7 @@ Contributions are welcome! Some ideas:
 
 - **New domain profiles** — add keyword databases for law, marketing, academia, etc.
 - **Additional ATS parsers** — test against more ATS systems (Taleo, iCIMS, Greenhouse)
-- **UI/Dashboard** — build a web frontend for the scoring API
+- **UI/Dashboard** — the web app is live at [resume-scorer-web.streamlit.app](https://resume-scorer-web.streamlit.app)
 - **Resume templates** — add more DOCX template styles
 - **Internationalization** — support for non-English resumes and job markets
 
