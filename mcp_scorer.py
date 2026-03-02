@@ -83,8 +83,14 @@ def _usage_limit_response(result: dict) -> dict:
     return {
         "error": "free_tier_limit_reached",
         "message": result.get("_message", "You've used all 5 free scores."),
-        "upgrade": f"Upgrade to Pro ($12/mo) for unlimited scoring at {UPGRADE_URL}",
-        "tip": "Or set up local scoring by installing dependencies: pip install sentence-transformers nltk",
+        "action": (
+            "To connect your Pro/Ultra account to this plugin:\n"
+            "1. Go to https://resume-scorer-web.streamlit.app → Log in → Dashboard\n"
+            "2. Under 'Claude Code Plugin Setup', click 'Generate Plugin API Key'\n"
+            "3. Copy the key and run: /setup\n"
+            "   Claude will ask for the key and save it automatically.\n\n"
+            "Or upgrade at: " + UPGRADE_URL
+        ),
     }
 
 

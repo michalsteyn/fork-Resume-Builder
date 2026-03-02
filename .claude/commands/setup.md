@@ -64,12 +64,37 @@ Ask the user if they want to enable the LLM-augmented scorer (uses Claude API fo
 
 If yes:
 1. They need an Anthropic API key from https://console.anthropic.com/
-2. Create a `.env` file with: `ANTHROPIC_API_KEY=sk-ant-...`
+2. Add to `.env` file: `ANTHROPIC_API_KEY=sk-ant-...`
 3. This enables the `score_llm` and `score_combined` tools
 
 If no, skip this step. The rules-based ATS and HR scorers work without an API key.
 
-### Step 5: Verify
+### Step 5: (Optional) Connect Pro/Ultra Account
+
+Ask the user: "Do you have a Pro or Ultra account on the Resume Scorer web app?"
+
+If YES:
+1. Tell them:
+   ```
+   Go to: https://resume-scorer-web.streamlit.app
+   → Log in → Dashboard → "Claude Code Plugin Setup"
+   → Click "Generate Plugin API Key"
+   → Copy the key that appears (starts with rb_...)
+   ```
+2. Ask them to paste their API key here.
+3. When they paste it, write it to the `.env` file:
+   ```
+   SCORER_CLOUD_URL=https://resume-scorer.fly.dev
+   SCORER_CLOUD_API_KEY=<their key>
+   ```
+   Use the Write or Edit tool to add these lines to the `.env` file in the project folder.
+4. Confirm: "Your Pro/Ultra account is now linked. The plugin will use your cloud account for all scoring."
+
+If NO or SKIP:
+- The plugin uses free cloud scoring (5 scores total) then falls back to local scoring.
+- They can always run `/setup` again later to add the key.
+
+### Step 6: Verify
 
 Run a quick test to verify everything works:
 
@@ -82,10 +107,11 @@ If successful, tell the user:
 ```
 Setup complete! You can now use:
 
-  /resume-builder:resume [paste job description]    — Full resume + cover letter package
-  /resume-builder:tailor-resume [paste JD]          — Resume only
-  /resume-builder:cover-letter [paste JD]           — Cover letter only
-  /resume-builder:writing-coach [resume file]       — Improve resume writing quality
+  /resume [paste job description]         — Full resume + cover letter package
+  /tailor-resume [paste JD]               — Resume only
+  /cover-letter [paste JD]               — Cover letter only
+  /writing-coach [resume file]            — Improve resume writing quality
+  /find-jobs [job title] [location]       — Discover & score matching jobs
 
 The ATS/HR scoring engine is now active and will automatically score your resumes.
 ```
