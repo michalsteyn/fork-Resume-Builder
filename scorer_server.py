@@ -174,6 +174,13 @@ class JobDiscoverRequest(BaseModel):
     max_results: int = Field(10, ge=1, le=20, description="Number of top-scored jobs to return")
 
 
+class FetchJDRequest(BaseModel):
+    """Fetch full job description from a listing URL."""
+    url: str = Field(..., description="Job listing URL to scrape")
+    job_title: str = Field("", description="Job title hint for AI extraction")
+    use_ai: bool = Field(True, description="Use Claude Haiku to clean/extract JD from raw page text")
+
+
 class ResumeUploadRequest(BaseModel):
     """Upload or replace the authenticated user's saved resume."""
     resume_text: Optional[str] = Field(None, description="Plain text resume content")
@@ -1599,6 +1606,31 @@ def discover_jobs_endpoint(req: JobDiscoverRequest, api_key=Depends(verify_api_k
         return JSONResponse(content=result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Job discovery failed: {str(e)}")
+
+
+@app.post("/jobs/fetch-jd")
+def fetch_jd_endpoint(req: FetchJDRequest, api_key=Depends(verify_api_key)):
+    """Scrape full job description from a listing URL. Uses trafilatura + Claude Haiku."""
+    import jd_fetcher
+
+    raw_text = jd_fetcher.fetch_jd_from_url(req.url)
+    if not raw_text:
+        raise HTTPException(
+            status_code=422,
+            detail="Could not extract text from this URL. The site may block scrapers (LinkedIn, Indeed). Please paste the JD manually.",
+        )
+
+    jd_text = raw_text
+    if req.use_ai and len(raw_text) > 400:
+        api_key_str = os.getenv("ANTHROPIC_API_KEY", "")
+        if api_key_str:
+            jd_text = jd_fetcher.extract_jd_with_ai(raw_text, req.job_title, api_key_str)
+
+    return {
+        "jd_text": jd_text,
+        "char_count": len(jd_text),
+        "raw_char_count": len(raw_text),
+    }
 
 
 # =============================================================================
