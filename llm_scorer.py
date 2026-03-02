@@ -202,6 +202,123 @@ RESUME:
         }
 
 
+def rewrite_resume(
+    resume_text: str,
+    jd_text: str,
+    model: str = "claude-sonnet-4-6",
+    temperature: float = 0.3,
+    domain_hint: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Rewrite/tailor a resume to match a job description using Claude.
+
+    Follows authenticity rules: never changes job titles, company names, dates,
+    education, publications, or certifications. Only modifies summary,
+    core competencies, and bullet point phrasing.
+
+    Returns:
+        - rewritten_resume: Full rewritten resume text
+        - changes_made: List of changes applied
+        - explanation: Summary of what was changed and why
+    """
+    if not ANTHROPIC_AVAILABLE:
+        return {
+            "error": "anthropic package not installed",
+            "rewritten_resume": None,
+            "changes_made": [],
+            "explanation": "LLM rewriting unavailable",
+        }
+
+    client = anthropic.Anthropic()
+
+    domain_context = ""
+    if domain_hint:
+        domain_context = f"\nDomain: This is a {domain_hint.replace('_', ' ')} role."
+
+    rewrite_prompt = f"""You are an expert resume writer who tailors resumes for specific job descriptions.
+
+TASK: Rewrite the resume below to better match the job description. Return the FULL rewritten resume text.
+
+STRICT AUTHENTICITY RULES — YOU MUST FOLLOW THESE:
+1. NEVER change job titles — keep them EXACTLY as they are
+2. NEVER change company names — keep them EXACTLY as they are
+3. NEVER change dates or employment periods
+4. NEVER change education (degree names, school names, dates)
+5. NEVER change publications or citations
+6. NEVER change certifications or licenses
+7. NEVER invent new experience, roles, or achievements
+8. Each keyword should appear 1-2 times MAX across the entire resume
+9. Do NOT force awkward phrases just to match JD terminology
+
+WHAT YOU CAN MODIFY:
+1. Professional Summary — naturally incorporate 3-5 key JD terms
+2. Core Competencies — reorder and swap skills to match JD keywords (this is the PRIMARY place for keyword matching)
+3. Bullet points in Professional Experience — reframe existing achievements using JD language where it fits naturally
+4. Use strong action verbs (Led, Directed, Spearheaded, Achieved, Generated)
+5. Add quantified metrics where the original bullet implies them
+
+{domain_context}
+
+OUTPUT FORMAT — Return ONLY valid JSON:
+{{
+  "rewritten_resume": "<the full rewritten resume text>",
+  "changes_made": [
+    "Changed summary to include X, Y, Z keywords",
+    "Reordered core competencies to prioritize JD skills",
+    "Reframed bullet in Role X to highlight Y"
+  ],
+  "explanation": "<2-3 sentence summary of the tailoring strategy>"
+}}
+
+JOB DESCRIPTION:
+{jd_text}
+
+ORIGINAL RESUME:
+{resume_text}"""
+
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=8000,
+            temperature=temperature,
+            messages=[{"role": "user", "content": rewrite_prompt}],
+        )
+
+        response_text = response.content[0].text.strip()
+
+        # Handle markdown code block wrapping
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            json_lines = [l for l in lines if not l.strip().startswith("```")]
+            response_text = "\n".join(json_lines)
+
+        result = json.loads(response_text)
+        result["model_used"] = model
+        return result
+
+    except json.JSONDecodeError as e:
+        return {
+            "error": f"Failed to parse LLM response: {str(e)}",
+            "rewritten_resume": None,
+            "changes_made": [],
+            "explanation": "Rewrite failed — JSON parse error",
+        }
+    except anthropic.APIError as e:
+        return {
+            "error": f"Anthropic API error: {str(e)}",
+            "rewritten_resume": None,
+            "changes_made": [],
+            "explanation": f"Rewrite failed — API error",
+        }
+    except Exception as e:
+        return {
+            "error": f"Unexpected error: {str(e)}",
+            "rewritten_resume": None,
+            "changes_made": [],
+            "explanation": f"Rewrite failed: {str(e)}",
+        }
+
+
 def combine_scores(
     rules_ats: float,
     rules_hr: float,

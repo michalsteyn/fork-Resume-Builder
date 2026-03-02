@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "resume-scorer": {
+    "ai-resume-tuner": {
       "command": "python",
       "args": ["${CLAUDE_PLUGIN_ROOT}/mcp_scorer.py"],
       "cwd": "${CLAUDE_PLUGIN_ROOT}",

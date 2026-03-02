@@ -1,9 +1,20 @@
 [project]
-name = "resume-builder"
-version = "1.0.0"
-description = "AI-powered resume and cover letter generator with dual ATS+HR scoring"
+name = "ai-resume-tuner"
+version = "1.1.0"
+description = "Score, analyze, and optimize resumes against job descriptions using dual ATS + HR scoring with optional LLM-augmented analysis."
 requires-python = ">=3.10"
 license = {text = "MIT"}
+authors = [{name = "Jananthan Paramsothy"}]
+keywords = ["resume", "ats", "hr", "scoring", "mcp", "claude", "job-search", "career"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "Topic :: Office/Business",
+]
+
+[project.urls]
+Homepage = "https://resume-scorer.fly.dev"
+Repository = "https://github.com/jananthan30/resume-scorer-web"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

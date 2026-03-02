@@ -363,12 +363,16 @@ async def verify_api_key(request: Request):
         key_info["daily_count"] = key_info.get("daily_count", 0) + 1
         return api_key
 
-    # Anonymous access — track by IP fingerprint for free tier enforcement
+    # Anonymous access — track by session fingerprint (or IP fallback) for free tier enforcement
     if CLOUD_AVAILABLE:
-        client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown")
-        if "," in client_ip:
-            client_ip = client_ip.split(",")[0].strip()
-        fingerprint = hashlib.sha256(client_ip.encode()).hexdigest()[:16]
+        client_fingerprint = request.headers.get("X-Client-Fingerprint", "")
+        if client_fingerprint:
+            fingerprint = hashlib.sha256(client_fingerprint.encode()).hexdigest()[:16]
+        else:
+            client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown")
+            if "," in client_ip:
+                client_ip = client_ip.split(",")[0].strip()
+            fingerprint = hashlib.sha256(client_ip.encode()).hexdigest()[:16]
         anon_user = get_or_create_anonymous_user(fingerprint)
 
         if not _check_rate_limit(f"anon:{fingerprint}"):
@@ -1155,17 +1159,27 @@ def usage_stats(auth=Depends(verify_api_key)):
     return stats
 
 
+class CheckoutRequest(BaseModel):
+    tier: str = Field("pro", description="Tier to upgrade to: 'pro' or 'ultra'")
+
+
 @app.post("/billing/checkout")
-def billing_checkout(auth=Depends(verify_api_key)):
-    """Create a Stripe checkout session to upgrade to Pro."""
+def billing_checkout(req: CheckoutRequest = None, auth=Depends(verify_api_key)):
+    """Create a Stripe checkout session to upgrade to Pro or Ultra."""
     if not CLOUD_AVAILABLE or not isinstance(auth, dict):
         raise HTTPException(status_code=501, detail="Billing not available.")
     if not is_billing_configured():
         raise HTTPException(status_code=503, detail="Stripe billing not configured. Contact admin.")
-    if auth["tier"] == "pro":
-        return {"message": "Already on Pro tier."}
 
-    result = create_checkout_session(auth["user_id"], auth["email"])
+    target_tier = req.tier if req else "pro"
+    current_tier = auth.get("tier", "free")
+
+    # Already on same or higher tier
+    tier_rank = {"free": 0, "pro": 1, "ultra": 2}
+    if tier_rank.get(current_tier, 0) >= tier_rank.get(target_tier, 0):
+        return {"message": f"Already on {current_tier.title()} tier."}
+
+    result = create_checkout_session(auth["user_id"], auth["email"], tier=target_tier)
     if not result or "error" in result:
         raise HTTPException(status_code=500, detail=result.get("error", "Failed to create checkout session."))
     return result
@@ -1271,6 +1285,81 @@ async def score_combined(req: ScoreRequest, api_key: str = Depends(verify_api_ke
         'rules_hr': hr_scorer.result_to_dict(hr_result) if hr_result else None,
         'llm': llm_result
     }
+
+
+# =============================================================================
+# ULTRA — RESUME REWRITING
+# =============================================================================
+
+@app.post("/rewrite")
+async def rewrite_resume_endpoint(req: ScoreRequest, auth=Depends(verify_api_key_with_usage)):
+    """
+    Ultra tier: Rewrite resume to match JD, return before/after scores.
+    Requires 'ultra' tier subscription.
+    """
+    # Enforce ultra tier
+    if CLOUD_AVAILABLE and isinstance(auth, dict):
+        tier = auth.get("tier", "free")
+        if tier != "ultra":
+            raise HTTPException(
+                status_code=403,
+                detail="Resume rewriting requires an Ultra subscription ($29/month).",
+            )
+
+    resume_text, jd_text, resume_file_path = resolve_inputs(req)
+    _log_score_usage(auth, "/rewrite")
+
+    try:
+        # 1. Score the original resume
+        original_ats = ats_scorer.calculate_ats_score(resume_text, jd_text, resume_file_path)
+        try:
+            original_hr_obj = hr_scorer.calculate_hr_score_from_text(resume_text, jd_text)
+            original_hr = hr_scorer.result_to_dict(original_hr_obj)
+        except Exception:
+            original_hr = {"overall_score": 0}
+
+        # 2. Rewrite via LLM
+        from llm_scorer import rewrite_resume, ANTHROPIC_AVAILABLE
+        if not ANTHROPIC_AVAILABLE:
+            raise HTTPException(status_code=503, detail="LLM rewriting unavailable — anthropic package not installed.")
+
+        rewrite_result = rewrite_resume(resume_text, jd_text, domain_hint=req.domain_hint)
+
+        if rewrite_result.get("error") or not rewrite_result.get("rewritten_resume"):
+            raise HTTPException(
+                status_code=500,
+                detail=rewrite_result.get("error", "Rewrite failed — no output returned."),
+            )
+
+        rewritten_text = rewrite_result["rewritten_resume"]
+
+        # 3. Score the rewritten resume
+        rewritten_ats = ats_scorer.calculate_ats_score(rewritten_text, jd_text)
+        try:
+            rewritten_hr_obj = hr_scorer.calculate_hr_score_from_text(rewritten_text, jd_text)
+            rewritten_hr = hr_scorer.result_to_dict(rewritten_hr_obj)
+        except Exception:
+            rewritten_hr = {"overall_score": 0}
+
+        return {
+            "rewritten_resume": rewritten_text,
+            "changes_made": rewrite_result.get("changes_made", []),
+            "explanation": rewrite_result.get("explanation", ""),
+            "original_scores": {
+                "ats": original_ats.get("total_score", 0),
+                "hr": original_hr.get("overall_score", 0),
+            },
+            "rewritten_scores": {
+                "ats": rewritten_ats.get("total_score", 0),
+                "hr": rewritten_hr.get("overall_score", 0),
+            },
+            "model_used": rewrite_result.get("model_used", "claude-sonnet-4-6"),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Rewrite failed: {str(e)}")
 
 
 # =============================================================================

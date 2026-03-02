@@ -1,23 +1,29 @@
 """
-MCP Scorer Server — Exposes ATS, HR, and LLM resume scoring as MCP tools.
+AI Resume Tuner — MCP Server
 
-v3.0: Thin client mode — tries cloud API first, falls back to local scoring.
+Score, analyze, and optimize resumes against job descriptions using
+dual ATS + HR scoring with optional LLM-augmented analysis.
 
-This wraps the existing scoring engines (ats_scorer, hr_scorer, llm_scorer)
-so Claude Code and Claude Cowork can call them natively as MCP tools —
-no manual server startup required.
+Tools:
+    score_resume      — Full ATS + HR analysis in one call
+    score_ats         — ATS keyword/semantic scoring only
+    score_hr          — HR recruiter simulation only
+    score_with_llm    — LLM-augmented scoring (requires ANTHROPIC_API_KEY)
+    rewrite_resume    — AI-powered resume tailoring (requires ANTHROPIC_API_KEY)
+    explain_score     — Actionable improvement suggestions
+    extract_text      — Read PDF/DOCX/MD/TXT files
 
-Usage (standalone testing):
+Cloud-first: tries https://resume-scorer.fly.dev, falls back to local scoring.
+
+Usage:
     fastmcp run mcp_scorer.py
-
-As a plugin: configured via .mcp.json — auto-starts when plugin loads.
 """
 
 import os
 import sys
 from pathlib import Path
 
-# Load .env file from project root
+# Load .env from project root
 _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 if os.path.isfile(_env_path):
     with open(_env_path, "r", encoding="utf-8") as _ef:
@@ -27,27 +33,43 @@ if os.path.isfile(_env_path):
                 _k, _, _v = _line.partition("=")
                 os.environ[_k.strip()] = _v.strip()
 
-# Ensure project root is on sys.path for imports
+# Ensure project root is on sys.path
 PROJECT_ROOT = str(Path(__file__).parent)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from fastmcp import FastMCP
 
-# Create MCP server
 mcp = FastMCP(
-    "Resume Scorer",
-    instructions="Dual ATS + HR resume scoring with semantic matching, recruiter simulation, and optional LLM-augmented analysis. Supports cloud and local scoring.",
+    "AI Resume Tuner",
+    instructions=(
+        "Resume optimization toolkit. Score resumes against job descriptions "
+        "using ATS keyword matching, HR recruiter simulation, and optional "
+        "LLM-augmented analysis. Supports PDF, DOCX, Markdown, and plain text."
+    ),
 )
 
-# ─── Cloud client (optional — falls back to local) ───
+# ─── Cloud client (optional — falls back to local) ────────────────────────
+
 try:
     from cloud.client import cloud_score, cloud_health
-    CLOUD_CLIENT_AVAILABLE = True
+    CLOUD_AVAILABLE = True
 except ImportError:
-    CLOUD_CLIENT_AVAILABLE = False
+    CLOUD_AVAILABLE = False
 
-# Lazy-load scorers on first call (SBERT model takes ~5s)
+
+def _try_cloud(endpoint: str, resume_text: str, jd_text: str, extra: dict = None):
+    """Try cloud API first. Returns result dict or None."""
+    if not CLOUD_AVAILABLE:
+        return None
+    try:
+        return cloud_score(endpoint, resume_text, jd_text, extra)
+    except Exception:
+        return None
+
+
+# ─── Lazy-load local scorers (SBERT takes ~5s on first call) ──────────────
+
 _scorers_loaded = False
 
 
@@ -62,170 +84,243 @@ def _ensure_scorers():
         _scorers_loaded = True
 
 
-def _try_cloud(endpoint: str, resume_text: str, jd_text: str, extra: dict = None):
-    """Try cloud API. Returns result dict or None if unavailable."""
-    if not CLOUD_CLIENT_AVAILABLE:
-        return None
-    try:
-        return cloud_score(endpoint, resume_text, jd_text, extra)
-    except Exception:
-        return None
+# ─── Tools ────────────────────────────────────────────────────────────────
 
 
 @mcp.tool()
-def score_ats(resume_text: str, jd_text: str) -> dict:
-    """Score a resume against a job description using ATS (Applicant Tracking System) analysis.
+def score_resume(resume_text: str, jd_text: str) -> dict:
+    """Score a resume against a job description using both ATS and HR analysis.
 
-    Returns keyword match %, semantic similarity, domain detection, missing keywords,
-    readability analysis, and format risk assessment. Uses 8 weighted components:
-    keyword match (20%), phrase match (25%), industry terms (15%),
-    semantic similarity (10%), BM25 (10%), graph centrality (5%),
-    skill recency (5%), job title match (10%).
-
-    Args:
-        resume_text: The full text content of the resume
-        jd_text: The full text content of the job description
-
-    Returns:
-        Dictionary with total_score (0-100), matched/missing keywords, domain detection,
-        readability analysis, and detailed component breakdowns.
-    """
-    # Try cloud first
-    cloud_result = _try_cloud("/score/ats", resume_text, jd_text)
-    if cloud_result and "total_score" in cloud_result:
-        return cloud_result
-
-    # Fall back to local
-    _ensure_scorers()
-    result = ats_scorer.calculate_ats_score(resume_text, jd_text)
-    rating, likelihood, _color = ats_scorer.get_likelihood_rating(result["total_score"])
-    result["rating"] = rating
-    result["likelihood"] = likelihood
-    result["_source"] = "local"
-    return result
-
-
-@mcp.tool()
-def score_hr(resume_text: str, jd_text: str) -> dict:
-    """Score a resume using HR recruiter simulation — evaluates like a human hiring manager.
-
-    Analyzes experience fit, skills match, career trajectory, impact signals,
-    competitive edge, and job fit. Includes F-pattern visual scoring, job-hopping
-    penalty detection, and interview question generation.
+    This is the recommended tool for full resume evaluation. It runs:
+    1. ATS scoring — keyword matching, semantic similarity, phrase matching,
+       industry term recognition, and format risk assessment.
+    2. HR scoring — recruiter simulation evaluating experience fit, skills match,
+       career trajectory, impact signals, and competitive edge.
 
     Args:
-        resume_text: The full text content of the resume
-        jd_text: The full text content of the job description
+        resume_text: Full text of the resume.
+        jd_text: Full text of the job description.
 
     Returns:
-        Dictionary with overall_score (0-100), recommendation (INTERVIEW/MAYBE/PASS),
-        factor breakdown, strengths, concerns, and suggested interview questions.
+        Combined results with ats_score (0-100), hr_score (0-100),
+        matched/missing keywords, HR recommendation, and detailed breakdowns.
     """
-    # Try cloud first
-    cloud_result = _try_cloud("/score/hr", resume_text, jd_text)
-    if cloud_result and "overall_score" in cloud_result:
-        return cloud_result
-
-    # Fall back to local
-    _ensure_scorers()
-    hr_result = hr_scorer.calculate_hr_score_from_text(resume_text, jd_text)
-    result = hr_scorer.result_to_dict(hr_result)
-    result["_source"] = "local"
-    return result
-
-
-@mcp.tool()
-def score_both(resume_text: str, jd_text: str) -> dict:
-    """Run both ATS and HR scoring in a single call. Most efficient for full analysis.
-
-    Combines keyword/semantic ATS matching with human recruiter simulation.
-    Use this when you need both scores at once (e.g., during resume optimization).
-
-    Args:
-        resume_text: The full text content of the resume
-        jd_text: The full text content of the job description
-
-    Returns:
-        Dictionary with ats_score, hr_score, and full breakdowns for both.
-    """
-    # Try cloud first
     cloud_result = _try_cloud("/score/both", resume_text, jd_text)
     if cloud_result and "ats" in cloud_result:
         return cloud_result
 
-    # Fall back to local
     _ensure_scorers()
 
-    # ATS
     ats_result = ats_scorer.calculate_ats_score(resume_text, jd_text)
     rating, likelihood, _color = ats_scorer.get_likelihood_rating(ats_result["total_score"])
     ats_result["rating"] = rating
     ats_result["likelihood"] = likelihood
 
-    # HR
     try:
         hr_result = hr_scorer.calculate_hr_score_from_text(resume_text, jd_text)
         hr_dict = hr_scorer.result_to_dict(hr_result)
     except Exception as e:
         hr_dict = {"overall_score": 0, "error": str(e)}
 
+    ats_score = round(ats_result.get("total_score", 0), 1)
+    hr_score = round(hr_dict.get("overall_score", 0), 1)
+
     return {
         "ats": ats_result,
         "hr": hr_dict,
         "summary": {
-            "ats_score": round(ats_result.get("total_score", 0), 1),
-            "hr_score": round(hr_dict.get("overall_score", 0), 1),
+            "ats_score": ats_score,
+            "hr_score": hr_score,
             "ats_rating": ats_result.get("rating", "Unknown"),
             "hr_recommendation": hr_dict.get("recommendation", "Unknown"),
+            "assessment": _overall_assessment(ats_score, hr_score),
         },
-        "_source": "local",
     }
 
 
 @mcp.tool()
-def score_llm(resume_text: str, jd_text: str, domain_hint: str = "") -> dict:
-    """Score a resume using Claude LLM-augmented analysis (requires ANTHROPIC_API_KEY).
+def score_ats(resume_text: str, jd_text: str) -> dict:
+    """Score a resume using ATS (Applicant Tracking System) analysis only.
 
-    Uses Claude to evaluate the resume against a rubric covering keyword match,
-    semantic similarity, industry terms, job fit, experience fit, impact signals,
-    career trajectory, and competitive edge. Returns dimension-level scores with evidence.
+    Evaluates how well a resume matches a job description through eight
+    weighted components: keyword match (20%), phrase match (25%),
+    industry terms (15%), semantic similarity (10%), BM25 relevance (10%),
+    job title match (10%), graph centrality (5%), skill recency (5%).
 
     Args:
-        resume_text: The full text content of the resume
-        jd_text: The full text content of the job description
-        domain_hint: Optional domain hint (technology, finance, consulting, clinical_research, healthcare, pharma_biotech)
+        resume_text: Full text of the resume.
+        jd_text: Full text of the job description.
 
     Returns:
-        Dictionary with ats_score, hr_score, per-dimension scores with evidence,
+        Score (0-100) with matched/missing keywords, domain detection,
+        readability analysis, format risk flags, and component breakdowns.
+    """
+    cloud_result = _try_cloud("/score/ats", resume_text, jd_text)
+    if cloud_result and "total_score" in cloud_result:
+        return cloud_result
+
+    _ensure_scorers()
+    result = ats_scorer.calculate_ats_score(resume_text, jd_text)
+    rating, likelihood, _color = ats_scorer.get_likelihood_rating(result["total_score"])
+    result["rating"] = rating
+    result["likelihood"] = likelihood
+    return result
+
+
+@mcp.tool()
+def score_hr(resume_text: str, jd_text: str) -> dict:
+    """Score a resume using HR recruiter simulation.
+
+    Evaluates the resume as a human hiring manager would, analyzing:
+    experience fit (30%), skills match (20%), career trajectory (20%),
+    impact signals (20%), and competitive edge (10%). Includes F-pattern
+    visual scoring, job-hopping detection, and interview question generation.
+
+    Args:
+        resume_text: Full text of the resume.
+        jd_text: Full text of the job description.
+
+    Returns:
+        Score (0-100) with recommendation (INTERVIEW/MAYBE/PASS),
+        factor breakdown, strengths, concerns, and interview questions.
+    """
+    cloud_result = _try_cloud("/score/hr", resume_text, jd_text)
+    if cloud_result and "overall_score" in cloud_result:
+        return cloud_result
+
+    _ensure_scorers()
+    hr_result = hr_scorer.calculate_hr_score_from_text(resume_text, jd_text)
+    result = hr_scorer.result_to_dict(hr_result)
+    return result
+
+
+@mcp.tool()
+def score_with_llm(resume_text: str, jd_text: str, domain_hint: str = "") -> dict:
+    """Score a resume using Claude LLM-augmented analysis.
+
+    Requires ANTHROPIC_API_KEY in environment. Uses Claude to evaluate
+    the resume against a structured rubric covering keyword alignment,
+    semantic relevance, industry terminology, job fit, experience quality,
+    impact signals, career trajectory, and competitive positioning.
+
+    Args:
+        resume_text: Full text of the resume.
+        jd_text: Full text of the job description.
+        domain_hint: Optional domain (technology, finance, consulting,
+            clinical_research, healthcare, pharma_biotech).
+
+    Returns:
+        ATS and HR scores with per-dimension breakdowns, evidence quotes,
         and a human-readable explanation.
     """
-    # LLM scoring is always local (BYOK — user provides their own API key)
     try:
-        from llm_scorer import score_with_llm, ANTHROPIC_AVAILABLE
+        from llm_scorer import score_with_llm as _score_llm, ANTHROPIC_AVAILABLE
         if not ANTHROPIC_AVAILABLE:
             return {"error": "anthropic package not installed. Run: pip install anthropic"}
         if not os.environ.get("ANTHROPIC_API_KEY"):
             return {"error": "ANTHROPIC_API_KEY not set. Add it to your .env file."}
-        return score_with_llm(resume_text, jd_text, domain_hint=domain_hint or None)
+        return _score_llm(resume_text, jd_text, domain_hint=domain_hint or None)
     except Exception as e:
         return {"error": str(e)}
 
 
 @mcp.tool()
-def extract_text(file_path: str) -> dict:
-    """Extract text from a resume file (PDF, DOCX, MD, TXT).
+def rewrite_resume(resume_text: str, jd_text: str, domain_hint: str = "") -> dict:
+    """Rewrite a resume to better match a job description using Claude AI.
 
-    Reads the file and returns its plain text content. Use this when you need
-    to read a .docx or .pdf file that Claude's Read tool can't handle directly.
+    Requires ANTHROPIC_API_KEY in environment. Tailors the resume while
+    preserving authenticity — never changes job titles, company names,
+    dates, education, publications, or certifications. Only modifies:
+    professional summary, core competencies, and bullet point phrasing.
 
     Args:
-        file_path: Absolute or relative path to the file (.pdf, .docx, .md, .txt)
+        resume_text: Full text of the resume to optimize.
+        jd_text: Full text of the target job description.
+        domain_hint: Optional domain (technology, finance, consulting,
+            clinical_research, healthcare, pharma_biotech).
 
     Returns:
-        Dictionary with text content, detected format, and character count.
+        rewritten_resume (full text), changes_made (list of modifications),
+        and explanation (summary of optimization strategy).
     """
-    from pathlib import Path
+    try:
+        from llm_scorer import rewrite_resume as _rewrite, ANTHROPIC_AVAILABLE
+        if not ANTHROPIC_AVAILABLE:
+            return {
+                "error": "anthropic package not installed. Run: pip install anthropic",
+                "rewritten_resume": None,
+                "changes_made": [],
+            }
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            return {
+                "error": "ANTHROPIC_API_KEY not set. Add it to your .env file.",
+                "rewritten_resume": None,
+                "changes_made": [],
+            }
+        return _rewrite(resume_text, jd_text, domain_hint=domain_hint or None)
+    except Exception as e:
+        return {"error": str(e), "rewritten_resume": None, "changes_made": []}
 
+
+@mcp.tool()
+def explain_score(resume_text: str, jd_text: str) -> dict:
+    """Get actionable improvement suggestions for a resume.
+
+    Analyzes the resume against the job description and returns prioritized
+    suggestions: top missing keywords with placement recommendations,
+    quick wins, section-by-section improvement tips, and format warnings.
+
+    Args:
+        resume_text: Full text of the resume.
+        jd_text: Full text of the job description.
+
+    Returns:
+        Current ATS score plus detailed explanation with missing keywords,
+        improvement priorities, and specific suggestions.
+    """
+    cloud_result = _try_cloud("/explain", resume_text, jd_text)
+    if cloud_result and "explanation" in cloud_result:
+        return cloud_result
+
+    _ensure_scorers()
+
+    # Import the explanation generator from scorer_server
+    try:
+        from scorer_server import generate_ats_explanation
+    except ImportError:
+        # Fallback: score and return basic info
+        ats_result = ats_scorer.calculate_ats_score(resume_text, jd_text)
+        missing = ats_result.get("missing_keywords", [])
+        return {
+            "current_score": round(ats_result.get("total_score", 0), 1),
+            "explanation": {
+                "top_missing_keywords": missing[:10],
+                "suggestion": "Add these missing keywords to your Core Competencies or bullet points.",
+            },
+        }
+
+    ats_result = ats_scorer.calculate_ats_score(resume_text, jd_text)
+    explanation = generate_ats_explanation(resume_text, jd_text, ats_result)
+
+    return {
+        "current_score": round(ats_result.get("total_score", 0), 1),
+        "explanation": explanation,
+    }
+
+
+@mcp.tool()
+def extract_text(file_path: str) -> dict:
+    """Extract text from a resume file (PDF, DOCX, Markdown, or TXT).
+
+    Use this to read resume files that Claude can't open directly,
+    such as .docx and .pdf files.
+
+    Args:
+        file_path: Path to the file (.pdf, .docx, .md, .txt).
+
+    Returns:
+        Extracted text content, detected format, and character count.
+    """
     p = Path(file_path)
     if not p.exists():
         return {"error": f"File not found: {file_path}"}
@@ -249,77 +344,37 @@ def extract_text(file_path: str) -> dict:
             with open(str(p), "r", encoding="utf-8") as f:
                 text = f.read()
         else:
-            return {"error": f"Unsupported file format: {ext}. Supported: .pdf, .docx, .md, .txt"}
+            return {"error": f"Unsupported format: {ext}. Use .pdf, .docx, .md, or .txt"}
+    except ImportError as e:
+        pkg = "pdfplumber" if ext == ".pdf" else "python-docx"
+        return {"error": f"Missing dependency for {ext} files. Run: pip install {pkg}"}
     except Exception as e:
-        return {"error": f"Failed to extract text from {p.name}: {e}"}
+        return {"error": f"Failed to read {p.name}: {e}"}
+
+    if not text.strip():
+        return {"error": f"No text extracted from {p.name}. The file may be empty or image-based."}
 
     return {
-        "text": text,
+        "text": text.strip(),
         "format": ext,
-        "char_count": len(text),
+        "char_count": len(text.strip()),
     }
 
 
-@mcp.tool()
-def score_combined(resume_text: str, jd_text: str, domain_hint: str = "") -> dict:
-    """Run all three scorers (ATS + HR + LLM) and return a blended result.
+# ─── Helpers ──────────────────────────────────────────────────────────────
 
-    Combines rules-based ATS/HR scores with LLM-augmented scoring using a
-    70% rules / 30% LLM blend. Gracefully degrades to rules-only if LLM
-    is unavailable (no API key or anthropic package).
 
-    Args:
-        resume_text: The full text content of the resume
-        jd_text: The full text content of the job description
-        domain_hint: Optional domain hint for LLM scorer
-
-    Returns:
-        Dictionary with combined_ats, combined_hr (blended scores),
-        plus full breakdowns from all three scorers.
-    """
-    _ensure_scorers()
-
-    # Rules-based scores (try cloud, fall back to local)
-    cloud_result = _try_cloud("/score/both", resume_text, jd_text)
-
-    if cloud_result and "ats" in cloud_result:
-        rules_ats = cloud_result["ats"].get("total_score", 0)
-        rules_hr = cloud_result["hr"].get("overall_score", 0)
-        ats_result = cloud_result["ats"]
-        hr_dict = cloud_result["hr"]
+def _overall_assessment(ats_score: float, hr_score: float) -> str:
+    if ats_score >= 75 and hr_score >= 70:
+        return "STRONG: Passes both ATS and HR evaluation. Ready to submit."
+    elif ats_score >= 75 and hr_score < 70:
+        return "ATS READY, HR WEAK: Will pass ATS filters but may not impress recruiters. Strengthen impact signals."
+    elif ats_score < 75 and hr_score >= 70:
+        return "HR STRONG, ATS WEAK: Reads well to humans but may be filtered by ATS. Add more JD keywords."
+    elif ats_score >= 60 and hr_score >= 55:
+        return "COMPETITIVE: Decent match with room for improvement on both ATS keywords and HR appeal."
     else:
-        ats_result = ats_scorer.calculate_ats_score(resume_text, jd_text)
-        rules_ats = ats_result.get("total_score", 0)
-
-        try:
-            hr_result = hr_scorer.calculate_hr_score_from_text(resume_text, jd_text)
-            hr_dict = hr_scorer.result_to_dict(hr_result)
-            rules_hr = hr_result.overall_score
-        except Exception:
-            hr_dict = None
-            rules_hr = 0
-
-    # LLM score (always local — BYOK)
-    llm_result = {"ats_score": None, "hr_score": None, "error": "skipped"}
-    combined_ats, combined_hr = rules_ats, rules_hr
-    blend_details = {"method": "rules_only"}
-
-    try:
-        from llm_scorer import score_with_llm, combine_scores, ANTHROPIC_AVAILABLE
-        if ANTHROPIC_AVAILABLE and os.environ.get("ANTHROPIC_API_KEY"):
-            llm_result = score_with_llm(resume_text, jd_text, domain_hint=domain_hint or None)
-            combined_ats, combined_hr, blend_details = combine_scores(rules_ats, rules_hr, llm_result)
-    except Exception as e:
-        blend_details = {"method": "rules_only", "error": str(e)}
-
-    return {
-        "combined_ats": round(combined_ats, 1),
-        "combined_hr": round(combined_hr, 1),
-        "blend_details": blend_details,
-        "rules_ats": {"total_score": rules_ats},
-        "rules_hr": hr_dict,
-        "llm": llm_result,
-    }
+        return "NEEDS WORK: Significant gaps in keyword matching and recruiter appeal. Major revision recommended."
 
 
 if __name__ == "__main__":
