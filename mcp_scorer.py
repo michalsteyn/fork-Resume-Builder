@@ -11,6 +11,8 @@ Tools:
     score_with_llm    — LLM-augmented scoring (requires ANTHROPIC_API_KEY)
     rewrite_resume    — AI-powered resume tailoring (requires ANTHROPIC_API_KEY)
     explain_score     — Actionable improvement suggestions
+    generate_cover_letter — AI cover letter from resume + JD
+    discover_jobs     — Search jobs and score against your resume
     extract_text      — Read PDF/DOCX/MD/TXT files
 
 Cloud-first: tries https://resume-scorer.fly.dev, falls back to local scoring.
@@ -332,6 +334,117 @@ def explain_score(resume_text: str, jd_text: str) -> dict:
         "current_score": round(ats_result.get("total_score", 0), 1),
         "explanation": explanation,
     }
+
+
+@mcp.tool()
+def generate_cover_letter(
+    resume_text: str,
+    jd_text: str,
+    company_name: str = "",
+    job_title: str = "",
+) -> dict:
+    """Generate a tailored cover letter from a resume and job description.
+
+    Uses Claude AI to write a compelling, ready-to-send cover letter that
+    highlights the candidate's most relevant experience for the role.
+
+    Args:
+        resume_text: Full text of the candidate's resume.
+        jd_text: Full text of the job description.
+        company_name: Company name (auto-detected from JD if empty).
+        job_title: Job title (auto-detected from JD if empty).
+
+    Returns:
+        Cover letter paragraphs, full text, detected company/title, and word count.
+    """
+    cloud_result = _try_cloud(
+        "/cover-letter", resume_text, jd_text,
+        extra={"company_name": company_name, "job_title": job_title},
+    )
+    if _is_usage_limit(cloud_result):
+        return _usage_limit_response(cloud_result)
+    if cloud_result and "paragraphs" in cloud_result:
+        return cloud_result
+
+    # Fallback to local
+    from llm_scorer import generate_cover_letter as _gen_cl, ANTHROPIC_AVAILABLE
+    if not ANTHROPIC_AVAILABLE:
+        return {
+            "error": "no_api_key",
+            "message": (
+                "Cover letter generation requires the Anthropic API. "
+                "Set ANTHROPIC_API_KEY in your .env file, or use the cloud "
+                f"version at {UPGRADE_URL} (Pro tier required)."
+            ),
+        }
+    return _gen_cl(resume_text, jd_text, company_name=company_name, job_title=job_title)
+
+
+@mcp.tool()
+def discover_jobs(
+    resume_text: str,
+    job_title: str,
+    location: str = "",
+    remote_only: bool = False,
+    max_results: int = 10,
+) -> dict:
+    """Search for jobs and score them against your resume.
+
+    Searches Adzuna (and Remotive for remote jobs), then scores each result:
+    1. Lightweight pre-screening of top 20 candidates
+    2. Full ATS + HR scoring of top finalists
+
+    Args:
+        resume_text: Full text of your resume.
+        job_title: Target job title to search for (e.g., "Data Scientist").
+        location: Geographic location filter (e.g., "New York", "Remote").
+        remote_only: If True, also searches Remotive for remote-only jobs.
+        max_results: Number of top-scored jobs to return (1-20, default 10).
+
+    Returns:
+        Ranked list of jobs with ATS scores, HR scores, salary data, and apply URLs.
+    """
+    cloud_result = _try_cloud(
+        "/jobs/discover", resume_text, "",
+        extra={
+            "job_title": job_title,
+            "location": location,
+            "remote_only": remote_only,
+            "max_results": max_results,
+        },
+    )
+    if _is_usage_limit(cloud_result):
+        return _usage_limit_response(cloud_result)
+    if cloud_result and "jobs" in cloud_result:
+        return cloud_result
+
+    # Fallback to local
+    _ensure_scorers()
+    import job_discovery as _jd
+
+    # If no Adzuna keys locally and cloud failed, give a clear message
+    if not _jd.adzuna_configured() and not CLOUD_AVAILABLE:
+        return {
+            "error": "no_api_keys",
+            "message": (
+                "Job discovery requires Adzuna API keys. You have two options:\n\n"
+                "1. Cloud (recommended): Use the hosted scorer at "
+                f"{UPGRADE_URL} — no setup needed, Adzuna search is built in.\n\n"
+                "2. Local: Get free API keys at https://developer.adzuna.com/ "
+                "and add to your .env file:\n"
+                "   ADZUNA_APP_ID=your_app_id\n"
+                "   ADZUNA_APP_KEY=your_app_key\n\n"
+                "Note: Without Adzuna, only Remotive (remote jobs) is available."
+            ),
+        }
+
+    return _jd.discover_jobs(
+        resume_text=resume_text,
+        job_title=job_title,
+        location=location,
+        remote_only=remote_only,
+        max_results=max_results,
+    )
 
 
 @mcp.tool()

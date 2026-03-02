@@ -319,6 +319,125 @@ ORIGINAL RESUME:
         }
 
 
+def generate_cover_letter(
+    resume_text: str,
+    jd_text: str,
+    company_name: str = "",
+    job_title: str = "",
+    model: str = "claude-sonnet-4-6",
+    temperature: float = 0.4,
+) -> Dict[str, Any]:
+    """
+    Generate a tailored cover letter using Claude.
+
+    Returns:
+        - paragraphs: List of 4-5 paragraph strings (ready for DOCX generator)
+        - full_text: Complete cover letter as a single string
+        - company: Detected or provided company name
+        - job_title: Detected or provided job title
+        - word_count: Total word count
+    """
+    if not ANTHROPIC_AVAILABLE:
+        return {
+            "error": "anthropic package not installed",
+            "paragraphs": [],
+            "full_text": "",
+        }
+
+    client = anthropic.Anthropic()
+
+    prompt = f"""You are an expert career coach and professional cover letter writer.
+
+TASK: Write a compelling, ready-to-send cover letter for the job description below,
+based on the candidate's resume. The letter should feel personal and authentic — NOT
+like a template.
+
+STRUCTURE (4 paragraphs):
+1. OPENING HOOK: Express genuine enthusiasm for the role. Immediately highlight
+   the strongest qualification match. Show you understand what the role needs.
+2. VALUE PROPOSITION: Connect 3-4 specific experiences from the resume to key
+   requirements. Use brief STAR format (Situation → Action → Result). Include
+   quantified achievements where possible.
+3. COMPANY CONNECTION: Show knowledge of the company. Explain why this specific
+   company appeals to you beyond generic reasons.
+4. STRONG CLOSE: Express confidence, include a clear call to action, thank the reader.
+
+RULES:
+- Max 350-400 words total (ONE page)
+- Professional but personable tone
+- NO placeholder text like [Your Address] or [Company Values]
+- NO invented achievements — only reference what's in the resume
+- Use specific JD keywords naturally (don't stuff them)
+- Ready to send immediately — no blanks to fill in
+
+OUTPUT FORMAT — Return ONLY valid JSON:
+{{
+  "paragraphs": [
+    "First paragraph text...",
+    "Second paragraph text...",
+    "Third paragraph text...",
+    "Fourth paragraph text..."
+  ],
+  "company": "{company_name or 'detected company name'}",
+  "job_title": "{job_title or 'detected job title'}"
+}}
+
+JOB DESCRIPTION:
+{jd_text}
+
+CANDIDATE RESUME:
+{resume_text}"""
+
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=4000,
+            temperature=temperature,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        response_text = response.content[0].text.strip()
+
+        # Handle markdown code block wrapping
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            json_lines = [l for l in lines if not l.strip().startswith("```")]
+            response_text = "\n".join(json_lines)
+
+        result = json.loads(response_text)
+
+        paragraphs = result.get("paragraphs", [])
+        full_text = "\n\n".join(paragraphs)
+
+        return {
+            "paragraphs": paragraphs,
+            "full_text": full_text,
+            "company": result.get("company", company_name),
+            "job_title": result.get("job_title", job_title),
+            "word_count": len(full_text.split()),
+            "model_used": model,
+        }
+
+    except json.JSONDecodeError as e:
+        return {
+            "error": f"Failed to parse LLM response: {str(e)}",
+            "paragraphs": [],
+            "full_text": "",
+        }
+    except anthropic.APIError as e:
+        return {
+            "error": f"Anthropic API error: {str(e)}",
+            "paragraphs": [],
+            "full_text": "",
+        }
+    except Exception as e:
+        return {
+            "error": f"Unexpected error: {str(e)}",
+            "paragraphs": [],
+            "full_text": "",
+        }
+
+
 def combine_scores(
     rules_ats: float,
     rules_hr: float,

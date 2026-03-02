@@ -154,6 +154,23 @@ class BatchScoreRequest(BaseModel):
     include_ranking: bool = Field(True, description="Include comparative ranking")
 
 
+class CoverLetterRequest(BaseModel):
+    """Generate a cover letter from resume + JD."""
+    resume_text: str = Field(..., description="Full text of the resume")
+    jd_text: str = Field(..., description="Full text of the job description")
+    company_name: str = Field("", description="Company name (auto-detected if empty)")
+    job_title: str = Field("", description="Job title (auto-detected if empty)")
+
+
+class JobDiscoverRequest(BaseModel):
+    """Search for jobs and score them against a resume."""
+    resume_text: str = Field(..., description="Full text of the resume")
+    job_title: str = Field(..., description="Target job title to search for")
+    location: str = Field("", description="Geographic location filter")
+    remote_only: bool = Field(False, description="Also search remote job boards")
+    max_results: int = Field(10, ge=1, le=20, description="Number of top-scored jobs to return")
+
+
 class APIKeyRequest(BaseModel):
     """Request to create an API key."""
     tier: str = Field("free", description="Tier: free, pro, team")
@@ -709,6 +726,9 @@ def health():
         "cloud": {
             "available": CLOUD_AVAILABLE,
             "billing_configured": is_billing_configured() if CLOUD_AVAILABLE else False,
+        },
+        "job_discovery": {
+            "adzuna_configured": bool(os.getenv("ADZUNA_APP_ID")) and bool(os.getenv("ADZUNA_APP_KEY")),
         },
         "cache_size": len(_score_cache),
         "auth_required": _config["require_auth"],
@@ -1376,6 +1396,81 @@ async def rewrite_resume_endpoint(req: ScoreRequest, auth=Depends(verify_api_key
 
 
 # =============================================================================
+# COVER LETTER ENDPOINT
+# =============================================================================
+
+
+@app.post("/cover-letter")
+async def cover_letter_endpoint(req: CoverLetterRequest, auth=Depends(verify_api_key_with_usage)):
+    """Generate a tailored cover letter. Requires Pro or Ultra tier."""
+    # Enforce tier
+    if CLOUD_AVAILABLE and isinstance(auth, dict):
+        tier = auth.get("tier", "free")
+        if tier not in ("pro", "ultra"):
+            raise HTTPException(
+                status_code=403,
+                detail="Cover letter generation requires a Pro ($12/month) or Ultra ($29/month) subscription.",
+            )
+
+    _log_score_usage(auth, "/cover-letter")
+
+    try:
+        from llm_scorer import generate_cover_letter, ANTHROPIC_AVAILABLE
+        if not ANTHROPIC_AVAILABLE:
+            raise HTTPException(status_code=503, detail="Cover letter generation unavailable — anthropic package not installed.")
+
+        result = generate_cover_letter(
+            resume_text=req.resume_text,
+            jd_text=req.jd_text,
+            company_name=req.company_name,
+            job_title=req.job_title,
+        )
+
+        if result.get("error"):
+            raise HTTPException(status_code=500, detail=result["error"])
+
+        return JSONResponse(content=result)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Cover letter generation failed: {str(e)}")
+
+
+# =============================================================================
+# JOB DISCOVERY ENDPOINT
+# =============================================================================
+
+
+@app.post("/jobs/discover")
+def discover_jobs_endpoint(req: JobDiscoverRequest, api_key: str = Depends(verify_api_key_with_usage)):
+    """Search for jobs and score them against a resume. Counts as 1 score usage."""
+    _log_score_usage(api_key, "/jobs/discover")
+
+    # Cache check (1-hour TTL for job discovery)
+    cache_content = req.resume_text[:500] + req.job_title + req.location + str(req.remote_only)
+    cache_key = hashlib.sha256(cache_content.encode()).hexdigest()[:32]
+    cached = _get_cached(cache_key)
+    if cached:
+        cached["_cached"] = True
+        return JSONResponse(content=cached)
+
+    try:
+        import job_discovery
+        result = job_discovery.discover_jobs(
+            resume_text=req.resume_text,
+            job_title=req.job_title,
+            location=req.location,
+            remote_only=req.remote_only,
+            max_results=req.max_results,
+        )
+        _set_cached(cache_key, result)
+        return JSONResponse(content=result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Job discovery failed: {str(e)}")
+
+
+# =============================================================================
 # CLI ENTRY POINT
 # =============================================================================
 
@@ -1422,6 +1517,8 @@ if __name__ == "__main__":
     print(f"  POST /score/combined — Blended ATS + HR + LLM score")
     print(f"  POST /score/batch    — Batch scoring")
     print(f"  POST /explain        — Score explanation")
+    print(f"  POST /cover-letter   — Cover letter generation (Pro/Ultra)")
+    print(f"  POST /jobs/discover  — Job discovery + scoring")
     print(f"\n  Auth & Billing Endpoints:")
     print(f"  POST /auth/register  — Create account")
     print(f"  POST /auth/login     — Login (returns JWT)")
