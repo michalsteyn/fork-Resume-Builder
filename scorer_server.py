@@ -1,5 +1,5 @@
 """
-Scorer API Server v2.0 — FastAPI service for ATS and HR resume scoring.
+Scorer API Server v3.0 — FastAPI service for ATS and HR resume scoring.
 
 Supports multiple input modes:
 1. Raw text:    { "resume_text": "...", "jd_text": "..." }
@@ -7,12 +7,14 @@ Supports multiple input modes:
 3. File path:   { "resume_path": "...", "jd_path": "..." }  (local mode only)
 
 Features:
-- API key authentication (optional, enabled via --require-auth)
+- JWT + API key authentication with SQLite-backed user management
+- Freemium tier enforcement (5 free scores, then Stripe subscription)
 - Rate limiting (configurable per-key and global)
 - Response caching (hash-based, 24h TTL)
 - CORS support for web frontends
 - Batch scoring endpoint
 - Score explanation engine
+- Stripe billing integration (checkout, webhooks, portal)
 
 Usage:
     python scorer_server.py [--port 8100] [--host 0.0.0.0] [--require-auth] [--cors-origins "*"]
@@ -61,23 +63,49 @@ import hr_scorer
 _elapsed = time.time() - _start
 print(f"Models loaded in {_elapsed:.1f}s")
 
+# ─── Cloud modules (graceful import — works locally without cloud deps) ───
+try:
+    from cloud.config import settings as cloud_settings
+    from cloud.auth import (
+        create_user, authenticate_user, get_user_by_id,
+        create_api_key as create_user_api_key, validate_api_key as validate_user_api_key,
+        log_usage, check_usage_allowed, get_usage_stats,
+        create_jwt_token, decode_jwt_token, update_user_tier,
+    )
+    from cloud.billing import (
+        is_billing_configured, create_checkout_session,
+        handle_webhook_event, create_portal_session,
+    )
+    CLOUD_AVAILABLE = True
+except ImportError:
+    CLOUD_AVAILABLE = False
+
 # ─── App ───
 app = FastAPI(
     title="Resume Scorer API",
-    description="Dual ATS + HR resume scoring with ML models. Supports text, file upload, and batch scoring.",
-    version="2.0.0",
+    description="Dual ATS + HR resume scoring with ML models. Supports text, file upload, batch scoring, JWT auth, and Stripe billing.",
+    version="3.0.0",
 )
 
 _server_start_time = time.time()
 
 # ─── Configuration ───
-_config = {
-    "require_auth": False,
-    "rate_limit_per_minute": 60,
-    "rate_limit_per_day": 1000,
-    "cache_ttl_seconds": 86400,  # 24 hours
-    "free_tier_daily_limit": 10,
-}
+if CLOUD_AVAILABLE:
+    _config = {
+        "require_auth": cloud_settings.REQUIRE_AUTH,
+        "rate_limit_per_minute": cloud_settings.RATE_LIMIT_PER_MINUTE,
+        "rate_limit_per_day": cloud_settings.RATE_LIMIT_PER_DAY,
+        "cache_ttl_seconds": cloud_settings.CACHE_TTL_SECONDS,
+        "free_tier_total_limit": cloud_settings.FREE_TIER_TOTAL_LIMIT,
+    }
+else:
+    _config = {
+        "require_auth": False,
+        "rate_limit_per_minute": 60,
+        "rate_limit_per_day": 1000,
+        "cache_ttl_seconds": 86400,  # 24 hours
+        "free_tier_total_limit": 10,
+    }
 
 # ─── In-memory stores ───
 _api_keys: Dict[str, Dict[str, Any]] = {}  # key -> {tier, daily_count, last_reset}
@@ -273,33 +301,109 @@ def _check_rate_limit(api_key: str) -> bool:
 
 
 async def verify_api_key(request: Request):
-    """Dependency to verify API key if auth is required."""
+    """
+    Dependency to verify API key or JWT token (auth only, no usage limit check).
+
+    Use this for non-scoring endpoints (auth, usage, billing) that should always
+    be accessible to authenticated users regardless of free tier limits.
+
+    Supports:
+    1. JWT Bearer token (Authorization: Bearer <token>)
+    2. API key (X-API-Key header or api_key query param)
+    3. Legacy in-memory keys (backward compatible)
+
+    Returns auth context dict: {"user_id": int, "tier": str, "email": str} or "anonymous".
+    """
     if not _config["require_auth"]:
         return "anonymous"
 
+    # Try JWT Bearer token first
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer ") and CLOUD_AVAILABLE:
+        token = auth_header[7:]
+        payload = decode_jwt_token(token)
+        if not payload:
+            raise HTTPException(status_code=401, detail="Invalid or expired JWT token.")
+
+        user_id = payload["sub"]
+        tier = payload.get("tier", "free")
+
+        if not _check_rate_limit(str(user_id)):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again in 60 seconds.")
+
+        return {"user_id": user_id, "tier": tier, "email": payload.get("email", "")}
+
+    # Try API key (cloud SQLite-backed)
     api_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
 
     if not api_key:
-        raise HTTPException(status_code=401, detail="API key required. Pass via X-API-Key header or api_key query param.")
+        raise HTTPException(status_code=401, detail="Authentication required. Pass JWT via Authorization: Bearer <token> or API key via X-API-Key header.")
 
-    if api_key not in _api_keys:
-        raise HTTPException(status_code=403, detail="Invalid API key.")
+    # Try cloud-backed API key validation
+    if CLOUD_AVAILABLE:
+        key_info = validate_user_api_key(api_key)
+        if key_info:
+            user_id = key_info["user_id"]
+            tier = key_info["tier"]
 
-    if not _check_rate_limit(api_key):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again in 60 seconds.")
+            if not _check_rate_limit(str(user_id)):
+                raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again in 60 seconds.")
 
-    # Check daily limit for free tier
-    key_info = _api_keys[api_key]
-    today = datetime.now().strftime("%Y-%m-%d")
-    if key_info.get("last_reset") != today:
-        key_info["daily_count"] = 0
-        key_info["last_reset"] = today
+            return {"user_id": user_id, "tier": tier, "email": key_info.get("email", "")}
 
-    if key_info["tier"] == "free" and key_info["daily_count"] >= _config["free_tier_daily_limit"]:
-        raise HTTPException(status_code=429, detail=f"Free tier limit reached ({_config['free_tier_daily_limit']}/day). Upgrade for unlimited scoring.")
+    # Fall back to legacy in-memory keys
+    if api_key in _api_keys:
+        if not _check_rate_limit(api_key):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again in 60 seconds.")
 
-    key_info["daily_count"] = key_info.get("daily_count", 0) + 1
-    return api_key
+        key_info = _api_keys[api_key]
+        today = datetime.now().strftime("%Y-%m-%d")
+        if key_info.get("last_reset") != today:
+            key_info["daily_count"] = 0
+            key_info["last_reset"] = today
+
+        key_info["daily_count"] = key_info.get("daily_count", 0) + 1
+        return api_key
+
+    raise HTTPException(status_code=403, detail="Invalid API key.")
+
+
+async def verify_api_key_with_usage(request: Request):
+    """
+    Dependency for scoring endpoints — authenticates AND enforces free tier limits.
+    """
+    auth = await verify_api_key(request)
+
+    # Check usage limits for free tier (cloud-backed users only)
+    if CLOUD_AVAILABLE and isinstance(auth, dict):
+        user_id = auth["user_id"]
+        tier = auth.get("tier", "free")
+        if tier == "free" and not check_usage_allowed(user_id, tier):
+            raise HTTPException(
+                status_code=402,
+                detail=f"Free tier limit reached ({_config['free_tier_total_limit']} scores). Upgrade to Pro for unlimited scoring.",
+            )
+
+    # Check legacy in-memory key limits
+    if isinstance(auth, str) and auth in _api_keys:
+        key_info = _api_keys[auth]
+        if key_info["tier"] == "free" and key_info.get("daily_count", 0) >= _config["free_tier_total_limit"]:
+            raise HTTPException(status_code=402, detail="Free tier limit reached. Upgrade for unlimited scoring.")
+
+    return auth
+
+
+# =============================================================================
+# USAGE LOGGING HELPER
+# =============================================================================
+
+def _log_score_usage(auth_context, endpoint: str):
+    """Log a scoring request if cloud auth is active."""
+    if CLOUD_AVAILABLE and isinstance(auth_context, dict) and "user_id" in auth_context:
+        try:
+            log_usage(auth_context["user_id"], endpoint)
+        except Exception:
+            pass  # Don't fail scoring if logging fails
 
 
 # =============================================================================
@@ -569,12 +673,16 @@ def health():
     """Server status, model availability, and usage stats."""
     return {
         "status": "ok",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "uptime_seconds": round(time.time() - _server_start_time, 1),
         "models": {
             "spacy": getattr(ats_scorer, "SPACY_AVAILABLE", False),
             "sbert": getattr(ats_scorer, "SBERT_AVAILABLE", False),
             "textstat": getattr(ats_scorer, "TEXTSTAT_AVAILABLE", False),
+        },
+        "cloud": {
+            "available": CLOUD_AVAILABLE,
+            "billing_configured": is_billing_configured() if CLOUD_AVAILABLE else False,
         },
         "cache_size": len(_score_cache),
         "auth_required": _config["require_auth"],
@@ -582,9 +690,10 @@ def health():
 
 
 @app.post("/score/ats")
-def score_ats(req: ScoreRequest, api_key: str = Depends(verify_api_key)):
+def score_ats(req: ScoreRequest, api_key: str = Depends(verify_api_key_with_usage)):
     """ATS score a resume against a job description. Accepts text, base64 files, or file paths."""
     resume_text, jd_text, file_path = resolve_inputs(req)
+    _log_score_usage(api_key, "/score/ats")
 
     # Check cache
     cache_key = _cache_key(resume_text, jd_text, "ats")
@@ -611,9 +720,10 @@ def score_ats(req: ScoreRequest, api_key: str = Depends(verify_api_key)):
 
 
 @app.post("/score/hr")
-def score_hr(req: ScoreRequest, api_key: str = Depends(verify_api_key)):
+def score_hr(req: ScoreRequest, api_key: str = Depends(verify_api_key_with_usage)):
     """HR score a resume against a job description. Accepts text, base64 files, or file paths."""
     resume_text, jd_text, file_path = resolve_inputs(req)
+    _log_score_usage(api_key, "/score/hr")
 
     # Check cache
     cache_key = _cache_key(resume_text, jd_text, "hr")
@@ -768,9 +878,10 @@ def score_hr(req: ScoreRequest, api_key: str = Depends(verify_api_key)):
 
 
 @app.post("/score/both")
-def score_both(req: ScoreRequest, api_key: str = Depends(verify_api_key)):
+def score_both(req: ScoreRequest, api_key: str = Depends(verify_api_key_with_usage)):
     """Combined ATS + HR scoring in a single call. Most efficient for full analysis."""
     resume_text, jd_text, file_path = resolve_inputs(req)
+    _log_score_usage(api_key, "/score/both")
 
     # Check cache
     cache_key = _cache_key(resume_text, jd_text, "both")
@@ -845,7 +956,7 @@ def score_both(req: ScoreRequest, api_key: str = Depends(verify_api_key)):
 
 
 @app.post("/score/batch")
-def score_batch(req: BatchScoreRequest, api_key: str = Depends(verify_api_key)):
+def score_batch(req: BatchScoreRequest, api_key: str = Depends(verify_api_key_with_usage)):
     """Batch scoring: multiple resumes vs one JD, or one resume vs multiple JDs."""
     results = []
 
@@ -896,7 +1007,7 @@ def score_batch(req: BatchScoreRequest, api_key: str = Depends(verify_api_key)):
 
 
 @app.post("/explain")
-def explain_score(req: ScoreRequest, api_key: str = Depends(verify_api_key)):
+def explain_score(req: ScoreRequest, api_key: str = Depends(verify_api_key_with_usage)):
     """Get detailed explanation and improvement suggestions without re-scoring (uses cache)."""
     resume_text, jd_text, file_path = resolve_inputs(req)
 
@@ -963,11 +1074,129 @@ def admin_stats():
 
 
 # =============================================================================
+# AUTH & BILLING ENDPOINTS (cloud mode)
+# =============================================================================
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class CreateKeyRequest(BaseModel):
+    label: str = ""
+
+
+@app.post("/auth/register")
+def register(req: RegisterRequest):
+    """Register a new user account (free tier)."""
+    if not CLOUD_AVAILABLE:
+        raise HTTPException(status_code=501, detail="Cloud auth not available in local mode.")
+    try:
+        user = create_user(req.email, req.password)
+        token = create_jwt_token(user["id"], user["email"], user["tier"])
+        return {"user": user, "token": token}
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post("/auth/login")
+def login(req: LoginRequest):
+    """Login and receive a JWT token."""
+    if not CLOUD_AVAILABLE:
+        raise HTTPException(status_code=501, detail="Cloud auth not available in local mode.")
+    user = authenticate_user(req.email, req.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    token = create_jwt_token(user["id"], user["email"], user["tier"])
+    return {"user": user, "token": token}
+
+
+@app.post("/auth/api-key")
+def create_key(req: CreateKeyRequest, auth=Depends(verify_api_key)):
+    """Generate a new API key for the authenticated user."""
+    if not CLOUD_AVAILABLE or not isinstance(auth, dict):
+        raise HTTPException(status_code=501, detail="Cloud auth not available.")
+    raw_key = create_user_api_key(auth["user_id"], req.label)
+    return {"api_key": raw_key, "label": req.label, "note": "Save this key — it won't be shown again."}
+
+
+@app.get("/auth/usage")
+def usage_stats(auth=Depends(verify_api_key)):
+    """Get usage stats for the authenticated user."""
+    if not CLOUD_AVAILABLE or not isinstance(auth, dict):
+        return {"total_scores": 0, "tier": "anonymous"}
+    stats = get_usage_stats(auth["user_id"])
+    stats["tier"] = auth["tier"]
+    return stats
+
+
+@app.post("/billing/checkout")
+def billing_checkout(auth=Depends(verify_api_key)):
+    """Create a Stripe checkout session to upgrade to Pro."""
+    if not CLOUD_AVAILABLE or not isinstance(auth, dict):
+        raise HTTPException(status_code=501, detail="Billing not available.")
+    if not is_billing_configured():
+        raise HTTPException(status_code=503, detail="Stripe billing not configured. Contact admin.")
+    if auth["tier"] == "pro":
+        return {"message": "Already on Pro tier."}
+
+    result = create_checkout_session(auth["user_id"], auth["email"])
+    if not result or "error" in result:
+        raise HTTPException(status_code=500, detail=result.get("error", "Failed to create checkout session."))
+    return result
+
+
+@app.post("/billing/webhook")
+async def billing_webhook(request: Request):
+    """Handle Stripe webhook events (subscription lifecycle)."""
+    if not CLOUD_AVAILABLE:
+        raise HTTPException(status_code=501, detail="Billing not available.")
+
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+
+    result = handle_webhook_event(payload, sig)
+
+    if result["action"] == "upgrade":
+        update_user_tier(
+            result["user_id"], result["tier"],
+            result.get("stripe_customer_id"), result.get("stripe_subscription_id"),
+        )
+        return {"status": "upgraded", "user_id": result["user_id"]}
+
+    elif result["action"] == "downgrade":
+        # Find user by stripe_customer_id and downgrade
+        # (simplified — in production, look up user by stripe_customer_id)
+        return {"status": "downgraded", "reason": result.get("reason")}
+
+    return {"status": "ignored", "event_type": result.get("event_type")}
+
+
+@app.post("/billing/portal")
+def billing_portal(auth=Depends(verify_api_key)):
+    """Get a Stripe Customer Portal URL for managing subscription."""
+    if not CLOUD_AVAILABLE or not isinstance(auth, dict):
+        raise HTTPException(status_code=501, detail="Billing not available.")
+
+    user = get_user_by_id(auth["user_id"])
+    if not user or not user.get("stripe_customer_id"):
+        raise HTTPException(status_code=400, detail="No active subscription found.")
+
+    portal_url = create_portal_session(user["stripe_customer_id"])
+    if not portal_url:
+        raise HTTPException(status_code=500, detail="Failed to create portal session.")
+    return {"portal_url": portal_url}
+
+
+# =============================================================================
 # LLM SCORING ENDPOINTS
 # =============================================================================
 
 @app.post("/score/llm")
-async def score_llm(req: ScoreRequest, api_key: str = Depends(verify_api_key)):
+async def score_llm(req: ScoreRequest, api_key: str = Depends(verify_api_key_with_usage)):
     """Score resume using LLM-augmented scorer (Claude)."""
     try:
         from llm_scorer import score_with_llm, ANTHROPIC_AVAILABLE
@@ -983,7 +1212,7 @@ async def score_llm(req: ScoreRequest, api_key: str = Depends(verify_api_key)):
 
 
 @app.post("/score/combined")
-async def score_combined(req: ScoreRequest, api_key: str = Depends(verify_api_key)):
+async def score_combined(req: ScoreRequest, api_key: str = Depends(verify_api_key_with_usage)):
     """Score resume using all three scorers (ATS + HR + LLM) and return blended result."""
     resume_text, jd_text, resume_file_path = resolve_inputs(req)
 
@@ -1026,7 +1255,7 @@ async def score_combined(req: ScoreRequest, api_key: str = Depends(verify_api_ke
 if __name__ == "__main__":
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="Resume Scorer API Server v2.0")
+    parser = argparse.ArgumentParser(description="Resume Scorer API Server v3.0")
     parser.add_argument("--port", type=int, default=8100, help="Port (default: 8100)")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host (default: 127.0.0.1)")
     parser.add_argument("--require-auth", action="store_true", help="Require API key authentication")
@@ -1034,8 +1263,8 @@ if __name__ == "__main__":
     parser.add_argument("--rate-limit", type=int, default=60, help="Requests per minute per key (default: 60)")
     args = parser.parse_args()
 
-    # Apply config
-    _config["require_auth"] = args.require_auth
+    # Apply config from CLI args (override env/cloud settings)
+    _config["require_auth"] = args.require_auth or _config["require_auth"]
     _config["rate_limit_per_minute"] = args.rate_limit
 
     # Add CORS middleware
@@ -1049,23 +1278,34 @@ if __name__ == "__main__":
     )
 
     print(f"\n{'='*60}")
-    print(f"  Resume Scorer API v2.0")
+    print(f"  Resume Scorer API v3.0")
     print(f"{'='*60}")
     print(f"  Server:  http://{args.host}:{args.port}")
-    print(f"  Auth:    {'Required (X-API-Key header)' if args.require_auth else 'Disabled'}")
+    print(f"  Auth:    {'Required (JWT + API Key)' if _config['require_auth'] else 'Disabled'}")
+    print(f"  Cloud:   {'Enabled' if CLOUD_AVAILABLE else 'Disabled (local mode)'}")
+    print(f"  Billing: {'Configured' if CLOUD_AVAILABLE and is_billing_configured() else 'Not configured'}")
     print(f"  CORS:    {args.cors_origins}")
     print(f"  Rate:    {args.rate_limit}/min per key")
-    print(f"\n  Endpoints:")
-    print(f"  GET  /health        — Server status and model info")
-    print(f"  POST /score/ats     — ATS score (text, base64, or file path)")
-    print(f"  POST /score/hr      — HR score (text, base64, or file path)")
-    print(f"  POST /score/both    — Combined ATS + HR score")
-    print(f"  POST /score/llm     — LLM-augmented score (Claude)")
+    print(f"\n  Scoring Endpoints:")
+    print(f"  GET  /health         — Server status and model info")
+    print(f"  POST /score/ats      — ATS score")
+    print(f"  POST /score/hr       — HR score")
+    print(f"  POST /score/both     — Combined ATS + HR score")
+    print(f"  POST /score/llm      — LLM-augmented score (Claude)")
     print(f"  POST /score/combined — Blended ATS + HR + LLM score")
-    print(f"  POST /score/batch   — Batch scoring (multiple resumes or JDs)")
-    print(f"  POST /explain       — Score explanation with improvement tips")
-    print(f"  POST /admin/create-key — Generate API key")
-    print(f"  GET  /admin/stats   — Server statistics")
+    print(f"  POST /score/batch    — Batch scoring")
+    print(f"  POST /explain        — Score explanation")
+    print(f"\n  Auth & Billing Endpoints:")
+    print(f"  POST /auth/register  — Create account")
+    print(f"  POST /auth/login     — Login (returns JWT)")
+    print(f"  POST /auth/api-key   — Generate API key")
+    print(f"  GET  /auth/usage     — Usage stats")
+    print(f"  POST /billing/checkout — Upgrade to Pro (Stripe)")
+    print(f"  POST /billing/webhook  — Stripe webhooks")
+    print(f"  POST /billing/portal   — Manage subscription")
+    print(f"\n  Admin Endpoints:")
+    print(f"  POST /admin/create-key — Legacy key generation")
+    print(f"  GET  /admin/stats      — Server statistics")
     print(f"{'='*60}\n")
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

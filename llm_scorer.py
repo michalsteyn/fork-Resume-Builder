@@ -21,6 +21,9 @@ try:
 except ImportError:
     ANTHROPIC_AVAILABLE = False
 
+# PII redaction (strip personal info before sending to external LLM)
+from pii_redactor import redact_text
+
 
 def score_with_llm(
     resume_text: str,
@@ -60,6 +63,10 @@ def score_with_llm(
 
     client = anthropic.Anthropic()  # Uses ANTHROPIC_API_KEY env var
 
+    # Redact PII before sending to external LLM API
+    resume_text = redact_text(resume_text)
+    jd_text = redact_text(jd_text)
+
     domain_context = ""
     if domain_hint:
         domain_context = f"\nDomain context: This is a {domain_hint.replace('_', ' ')} role. Weight domain-specific terminology and experience accordingly."
@@ -75,12 +82,14 @@ SCORING INSTRUCTIONS:
 {domain_context}
 
 ATS SCORING DIMENSIONS (simulate keyword/phrase matching):
-- keyword_match (weight 0.22): How many JD-specific nouns, skills, and technical terms appear in the resume? Score 5 if 80%+ of key terms present.
-- semantic_similarity (weight 0.22): Does the resume use similar vocabulary and phrasing as the JD? Score 5 if language closely mirrors JD.
-- industry_terms (weight 0.18): Are domain-critical terms present (e.g., terms specific to the role's domain)?
-- phrase_match (weight 0.13): Do exact 2-4 word JD phrases appear verbatim in the resume?
-- bm25_relevance (weight 0.13): Overall term frequency alignment between resume and JD.
-- skill_recency (weight 0.12): Are the most important skills demonstrated in recent roles (not just older positions)?
+- keyword_match (weight 0.20): How many JD-specific nouns, skills, and technical terms appear in the resume? Score 5 if 80%+ of key terms present.
+- phrase_match (weight 0.25): Do exact 2-4 word JD phrases appear verbatim in the resume? Exact phrases correlate 10.6x with callbacks.
+- industry_terms (weight 0.15): Are domain-critical terms present (e.g., terms specific to the role's domain)?
+- semantic_similarity (weight 0.10): Does the resume use similar vocabulary and phrasing as the JD? Score 5 if language closely mirrors JD.
+- bm25_relevance (weight 0.10): Overall term frequency alignment between resume and JD.
+- graph_centrality (weight 0.05): Are related/inferred skills from the same skill cluster present?
+- skill_recency (weight 0.05): Are the most important skills demonstrated in recent roles (not just older positions)?
+- job_title_match (weight 0.10): Does the exact JD job title appear in the resume header or summary?
 
 HR SCORING DIMENSIONS (simulate recruiter evaluation):
 - job_fit (weight 0.25): Does this candidate's background align with what this role ACTUALLY needs? Consider domain, function, and therapeutic area.
@@ -108,11 +117,13 @@ OUTPUT JSON SCHEMA (return ONLY this JSON, no other text):
   "dimensions": {{
     "ats": {{
       "keyword_match": {{"score": <0-5>, "evidence": "<brief evidence>"}},
-      "semantic_similarity": {{"score": <0-5>, "evidence": "<brief evidence>"}},
-      "industry_terms": {{"score": <0-5>, "evidence": "<brief evidence>"}},
       "phrase_match": {{"score": <0-5>, "evidence": "<brief evidence>"}},
+      "industry_terms": {{"score": <0-5>, "evidence": "<brief evidence>"}},
+      "semantic_similarity": {{"score": <0-5>, "evidence": "<brief evidence>"}},
       "bm25_relevance": {{"score": <0-5>, "evidence": "<brief evidence>"}},
-      "skill_recency": {{"score": <0-5>, "evidence": "<brief evidence>"}}
+      "graph_centrality": {{"score": <0-5>, "evidence": "<brief evidence>"}},
+      "skill_recency": {{"score": <0-5>, "evidence": "<brief evidence>"}},
+      "job_title_match": {{"score": <0-5>, "evidence": "<brief evidence>"}}
     }},
     "hr": {{
       "job_fit": {{"score": <0-5>, "evidence": "<brief evidence>"}},

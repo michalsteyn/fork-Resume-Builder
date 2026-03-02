@@ -1,0 +1,25 @@
+[project]
+name = "resume-builder"
+version = "1.0.0"
+description = "AI-powered resume and cover letter generator with dual ATS+HR scoring"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]  # Line length handled by line-length setting
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true

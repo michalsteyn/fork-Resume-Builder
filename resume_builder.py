@@ -44,23 +44,62 @@ except ImportError:
 # Configuration
 CONFIG_FILE = Path(__file__).parent / "config.json"
 DEFAULT_CONFIG = {
-    "master_resume_path": "YOUR_MASTER_RESUME.md",
+    "master_resume_path": "YOUR_MASTER_RESUME.docx",
     "output_base_dir": "applications",
     "user_name": "Your Name",
     "user_credentials": "",
     "user_email": "your.email@example.com",
     "user_phone": "555-123-4567",
-    "user_linkedin": "linkedin.com/in/your-profile"
+    "user_linkedin": "linkedin.com/in/your-profile",
+    "user_city": "Your City",
+    "user_state": "ST",
+    "user_zip": "00000"
 }
+
+# Values that indicate the user hasn't customized their config
+_PLACEHOLDER_VALUES = {
+    "master_resume_path": "YOUR_MASTER_RESUME.docx",
+    "user_name": "Your Name",
+    "user_email": "your.email@example.com",
+    "user_phone": "555-123-4567",
+    "user_linkedin": "linkedin.com/in/your-profile",
+    "user_city": "Your City",
+    "user_state": "ST",
+    "user_zip": "00000",
+}
+
+
+def validate_config(config):
+    """Check if any config fields still have default placeholder values and warn the user."""
+    warnings = []
+    for field, placeholder in _PLACEHOLDER_VALUES.items():
+        if config.get(field) == placeholder:
+            warnings.append(f"  - {field}: still set to default '{placeholder}'")
+    if warnings:
+        print("WARNING: The following config.json fields have not been customized:")
+        for w in warnings:
+            print(w)
+        print("Edit config.json to set your personal details.\n")
 
 
 def load_config():
     """Load configuration from config.json or create default."""
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
+            config = json.load(f)
+        # Backfill any new keys from DEFAULT_CONFIG
+        updated = False
+        for key, value in DEFAULT_CONFIG.items():
+            if key not in config:
+                config[key] = value
+                updated = True
+        if updated:
+            save_config(config)
+        validate_config(config)
+        return config
     else:
         save_config(DEFAULT_CONFIG)
+        validate_config(DEFAULT_CONFIG)
         return DEFAULT_CONFIG
 
 
@@ -70,17 +109,28 @@ def save_config(config):
         json.dump(config, f, indent=2)
 
 
-def extract_text_from_pdf(pdf_path: str) -> str:
-    """Extract text content from a PDF file."""
+def extract_text_from_file(file_path: str) -> str:
+    """Extract text content from a resume file (PDF, DOCX, MD, TXT)."""
+    ext = Path(file_path).suffix.lower()
     text = ""
     try:
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
+        if ext == ".pdf":
+            with pdfplumber.open(file_path) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+        elif ext == ".docx":
+            doc = Document(file_path)
+            text = "\n".join(para.text for para in doc.paragraphs)
+        elif ext in (".md", ".txt"):
+            with open(file_path, "r", encoding="utf-8") as f:
+                text = f.read()
+        else:
+            print(f"Error: Unsupported file format '{ext}'. Supported: .pdf, .docx, .md, .txt")
+            sys.exit(1)
     except Exception as e:
-        print(f"Error reading PDF: {e}")
+        print(f"Error reading {ext} file: {e}")
         sys.exit(1)
     return text
 
@@ -350,10 +400,10 @@ def main():
 
     # Extract resume text
     print("Extracting resume content...")
-    resume_text = extract_text_from_pdf(str(resume_path))
+    resume_text = extract_text_from_file(str(resume_path))
 
     if not resume_text.strip():
-        print("Error: Could not extract text from resume PDF.")
+        print(f"Error: Could not extract text from resume ({resume_path.suffix}).")
         sys.exit(1)
 
     print(f"Extracted {len(resume_text)} characters from resume.\n")

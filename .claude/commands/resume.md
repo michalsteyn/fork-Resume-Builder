@@ -62,10 +62,11 @@ Action A — Find best matching resume:
 - Use `Glob` to find all `applications/**/*Resume*.docx` files
 - From the folder names (format: `{Company} - {JobTitle}`), identify the most semantically similar role to the new JD (same domain, similar responsibilities, overlapping keywords)
 - If a match is found (PREFERRED): Read the `.docx` using Python via Bash: `python -c "from docx import Document; [print(p.text) for p in Document('path').paragraphs]"`
-- If no match found: Fall back to the master resume (read `config.json` for `master_resume_path`, or glob for `*MASTER*RESUME*.md`)
+- If no match found: Fall back to the master resume (read `config.json` for `master_resume_path`, or glob for `*MASTER*RESUME*.md`, `*MASTER*RESUME*.docx`, `*MASTER*RESUME*.pdf`)
 
 Action B — Read master resume:
 - Read the master resume (path from `config.json` → `master_resume_path`) for canonical job titles, dates, company names, education, certifications, publications, and memberships (these NEVER change)
+- **Format-aware reading:** `.md`/`.txt` → use `Read` tool directly. `.pdf` → use `Read` tool directly (Claude handles PDFs natively). `.docx` → call `extract_text` MCP tool with the file path (Claude cannot read binary DOCX files directly).
 
 Action C — Setup output + initialize orchestration state:
 - Extract company name and job title from JD

@@ -88,7 +88,29 @@ batch_jds/
 # Internal planning docs (not part of the tool)
 # ========================
 Deepresearch.md
+DEEP_RESEARCH_PROMPT.md
 MARKETING_PLAN.md
 SAAS_PLAN.md
 IMPLEMENTATION_PLAN.md
 ATS & HR Scorer Enhancement Research.txt
+Resume Builder Plugin Industry Research.txt
+
+# ========================
+# Cloud / Billing / Deployment (private — not for public repo)
+# ========================
+cloud/
+Dockerfile
+docker-compose.yml
+fly.toml
+.dockerignore
+requirements-cloud.txt
+*.db
+
+# ========================
+# Tests (private — not needed in public repo)
+# ========================
+tests/
+pytest.ini
+.pytest_cache/
+.coverage
+htmlcov/

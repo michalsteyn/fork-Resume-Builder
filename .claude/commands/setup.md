@@ -55,7 +55,7 @@ Check if the user has a `config.json` in their project. If not, create one from 
    - Email
    - Phone
    - LinkedIn URL
-   - Path to their master resume file (a markdown file with their full work history)
+   - Path to their master resume file (supported formats: .docx, .pdf, .md, or .txt)
 3. Create `config.json` with their answers
 
 ### Step 4: (Optional) LLM Scorer Setup

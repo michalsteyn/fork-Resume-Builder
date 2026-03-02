@@ -35,7 +35,7 @@ python hr_scorer.py --score resume.pdf jd.txt --web
 ## Project Structure
 ```
 Resume Builder/
-├── {master_resume from config.json}        # Master resume (markdown)
+├── {master_resume from config.json}        # Master resume (DOCX, PDF, or Markdown)
 ├── ats_scorer.py                           # ATS scoring engine (keyword matching)
 ├── hr_scorer.py                            # HR scoring engine (recruiter simulation)
 ├── docx_generator.py                       # ATS-compliant DOCX generator
@@ -276,7 +276,7 @@ create_ats_resume(
 - **A 75% ATS score with authentic content beats 90% with obvious stuffing**
 
 ## Notes for Claude
-- Master resume: Read from `config.json` → `master_resume_path` (or glob for `*MASTER*RESUME*.md`)
+- Master resume: Read from `config.json` → `master_resume_path` (or glob for `*MASTER*RESUME*.md`, `*MASTER*RESUME*.docx`, `*MASTER*RESUME*.pdf`). For `.docx` files, use the `extract_text` MCP tool (Claude cannot read binary DOCX directly).
 - Output folder format: `applications/{Company} - {JobTitle}/`
 - ATS target: 75-85% before creating DOCX (authenticity over high score)
 - HR target: 70%+ before creating DOCX

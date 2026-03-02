@@ -19,8 +19,9 @@ You are an expert career coach and professional writer. The user has provided a 
    - List all subfolders in `applications/`
    - Compare folder job titles against the NEW job description's title and requirements
    - **If a similar resume is found**: Read that resume to understand the applicant's tailored background for this type of role
-   - **If NO similar resume is found**: Read the master resume (path from `config.json` → `master_resume_path`, or glob for `*MASTER*RESUME*.md`) to understand the applicant's background
+   - **If NO similar resume is found**: Read the master resume (path from `config.json` → `master_resume_path`, or glob for `*MASTER*RESUME*.md`, `*MASTER*RESUME*.docx`, `*MASTER*RESUME*.pdf`) to understand the applicant's background
    - Always also read the master resume for canonical details
+   - **Format-aware reading:** `.md`/`.txt` → use `Read` tool directly. `.pdf` → use `Read` tool directly (Claude handles PDFs natively). `.docx` → call `extract_text` MCP tool with the file path (Claude cannot read binary DOCX files directly).
 
 3. **Create output folder** at `applications/{CompanyName} - {JobTitle}/` (if not exists)
 

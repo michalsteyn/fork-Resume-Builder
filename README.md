@@ -34,16 +34,23 @@ All of this runs in **parallel** — scoring happens in the background while the
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────┐  │
 │  │  ATS     │  │  HR      │  │  LLM     │  │  Writing   │  │
 │  │  Scorer  │  │  Scorer  │  │  Scorer  │  │  Coach     │  │
-│  │ (7-comp) │  │ (6-fact) │  │ (Claude) │  │ (10 rules) │  │
+│  │ (8-comp) │  │ (6-fact) │  │ (Claude) │  │ (10 rules) │  │
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └─────┬─────┘  │
 │       │              │             │               │        │
 │       └──────────────┴─────────────┘               │        │
 │                      │                             │        │
 │              ┌───────┴───────┐              ┌──────┴─────┐  │
 │              │  MCP Server   │              │   DOCX     │  │
-│              │ (auto-starts) │              │ Generator  │  │
-│              │  FastMCP 3.0  │              │ (Workday)  │  │
-│              └───────────────┘              └────────────┘  │
+│              │  (FastMCP 3)  │              │ Generator  │  │
+│              │  Cloud-first  │              │ (Workday)  │  │
+│              └───────┬───────┘              └────────────┘  │
+│                      │                                      │
+│            ┌─────────┴─────────┐                            │
+│            │  Cloud API        │                            │
+│            │  resume-scorer    │                            │
+│            │  .fly.dev         │                            │
+│            │  (JWT + API key)  │                            │
+│            └───────────────────┘                            │
 │                                                             │
 ├─────────────────────────────────────────────────────────────┤
 │  Orchestration State (state.json) — Multi-Agent DAG        │
@@ -51,22 +58,25 @@ All of this runs in **parallel** — scoring happens in the background while the
 └─────────────────────────────────────────────────────────────┘
 ```
 
+The MCP server operates in **thin client** mode: it tries the cloud API first for scoring, and falls back to local scoring if the cloud is unavailable or not configured. LLM scoring always runs locally using your own API key (BYOK).
+
 ---
 
 ## Dual Scoring System
 
-### ATS Scorer — 7 Weighted Components
+### ATS Scorer — 8 Weighted Components
 
 Simulates how Applicant Tracking Systems filter resumes before a human ever sees them.
 
 | Component | Weight | What It Measures |
 |-----------|--------|------------------|
-| Keyword Match | 22% | Lemmatized keywords with synonym expansion |
-| Semantic Similarity | 22% | SBERT vector cosine similarity between resume and JD |
-| Weighted Industry Terms | 18% | Domain-specific terminology with recency decay |
-| Phrase Match | 13% | Multi-word industry phrases (e.g., "clinical trial management") |
-| BM25 Score | 13% | Probabilistic relevance ranking (BM25Plus) |
-| Graph Centrality | 7% | Infers missing skills from related skills via NetworkX |
+| Phrase Match | 25% | Multi-word industry phrases (10.6x callback increase for exact matches) |
+| Keyword Match | 20% | Lemmatized keywords with synonym expansion |
+| Weighted Industry Terms | 15% | Domain-specific terminology with recency decay |
+| Semantic Similarity | 10% | SBERT vector cosine similarity between resume and JD |
+| BM25 Score | 10% | Probabilistic relevance ranking (BM25Plus) |
+| Job Title Match | 10% | Exact JD title in resume header/summary |
+| Graph Centrality | 5% | Infers missing skills from related skills via NetworkX |
 | Skill Recency | 5% | Exponential decay — recent experience weighted higher |
 
 **Additional checks:** Hidden text detection, readability analysis (Flesch-Kincaid Grade 10-12 optimal), format risk assessment.
@@ -160,9 +170,36 @@ cp config.example.json config.json
 
 Then edit `.env` (API key) and `config.json` (your info), and use the commands without the `resume-builder:` prefix (e.g., `/resume` instead of `/resume-builder:resume`).
 
+### Cloud Scoring (Optional)
+
+The scoring API is hosted at `https://resume-scorer.fly.dev`. Free users get **5 scored resumes**. To enable cloud scoring:
+
+1. **Register** for an API key:
+```bash
+curl -X POST https://resume-scorer.fly.dev/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com","password":"your-password"}'
+```
+
+2. **Create an API key** (use the JWT token from registration):
+```bash
+curl -X POST https://resume-scorer.fly.dev/auth/api-key \
+  -H "Authorization: Bearer <your-jwt-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"my-key"}'
+```
+
+3. **Add to your `.env` file:**
+```bash
+SCORER_CLOUD_URL=https://resume-scorer.fly.dev
+SCORER_CLOUD_API_KEY=rb_your_api_key_here
+```
+
+With cloud configured, MCP tools automatically try the cloud API first (faster, no local SBERT model needed) and fall back to local scoring if the cloud is unavailable. LLM scoring always runs locally with your own Anthropic API key.
+
 ### Your Master Resume
 
-Create a Markdown file with your complete work history. This is the single source of truth — all tailored resumes are generated from it:
+Create a file with your complete work history. Supported formats: `.docx`, `.pdf`, `.md`, or `.txt`. This is the single source of truth — all tailored resumes are generated from it. DOCX is recommended since most people already have their resume in that format.
 
 ```markdown
 FULL NAME, CREDENTIALS
@@ -224,9 +261,30 @@ Each command runs a multi-phase parallel workflow:
 - **Phase 5:** Parallel DOCX creation + tracker update
 - **Phase 6:** Cleanup + score report
 
-### Option 2: Scoring Server (REST API)
+### Option 2: Cloud Scoring API
 
-Run the scorers as a standalone service:
+Use the hosted API at `https://resume-scorer.fly.dev` — no local setup required:
+
+```bash
+# Register and get your API key
+curl -X POST https://resume-scorer.fly.dev/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com","password":"your-password"}'
+
+# Score a resume (use JWT from registration or create an API key)
+curl -X POST https://resume-scorer.fly.dev/score/ats \
+  -H "Authorization: Bearer <your-jwt-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"resume_text":"Your resume...", "jd_text":"Job description..."}'
+
+# Check remaining scores
+curl https://resume-scorer.fly.dev/auth/usage \
+  -H "Authorization: Bearer <your-jwt-token>"
+```
+
+### Option 3: Local Scoring Server
+
+Run the scorers locally as a standalone service:
 
 ```bash
 # Start the scoring server
@@ -235,22 +293,13 @@ python scorer_server.py --port 8100
 # Health check
 curl http://localhost:8100/health
 
-# Score a resume against a job description
+# Score (no auth required locally by default)
 curl -X POST http://localhost:8100/score/ats \
-  -F "resume=@resume.pdf" \
-  -F "jd=@job_description.txt"
-
-curl -X POST http://localhost:8100/score/hr \
-  -F "resume=@resume.pdf" \
-  -F "jd=@job_description.txt"
-
-# Combined scoring (ATS + HR + optional LLM)
-curl -X POST http://localhost:8100/score/combined \
-  -F "resume=@resume.pdf" \
-  -F "jd=@job_description.txt"
+  -H "Content-Type: application/json" \
+  -d '{"resume_text":"Your resume...", "jd_text":"Job description..."}'
 ```
 
-### Option 3: CLI Scorers (Standalone)
+### Option 4: CLI Scorers (Standalone)
 
 ```bash
 # ATS scoring
@@ -287,17 +336,55 @@ After running `/resume-builder:setup`, the MCP scorer auto-starts and provides t
 
 | Tool | What It Does |
 |------|-------------|
-| `score_ats` | ATS keyword + semantic scoring (7 components) |
+| `score_ats` | ATS keyword + semantic scoring (8 components) |
 | `score_hr` | HR recruiter simulation (6 factors + F-pattern) |
 | `score_both` | ATS + HR combined in one call |
 | `score_llm` | Claude-augmented scoring (requires API key) |
 | `score_combined` | All 3 blended (70% rules / 30% LLM) |
+| `extract_text` | Extract text from DOCX/PDF/MD/TXT files |
+
+All MCP tools support **cloud-first scoring** — they try the cloud API first and fall back to local scoring automatically. See [Cloud Scoring](#cloud-scoring-optional) for setup.
+
+### MCP Configuration
+
+The `.mcp.json` file configures the MCP server to auto-start with Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "resume-scorer": {
+      "command": "python",
+      "args": ["mcp_scorer.py"],
+      "cwd": "/path/to/Resume-Builder",
+      "env": {
+        "SCORER_CLOUD_URL": "https://resume-scorer.fly.dev",
+        "SCORER_CLOUD_API_KEY": "rb_your_api_key_here"
+      }
+    }
+  }
+}
+```
+
+**Environment variables for MCP:**
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SCORER_CLOUD_URL` | No | `https://resume-scorer.fly.dev` | Cloud scoring API URL |
+| `SCORER_CLOUD_API_KEY` | No | — | Your cloud API key (`rb_...`). Cloud scoring is disabled without this. |
+| `ANTHROPIC_API_KEY` | No | — | For LLM scoring (always runs locally with your key) |
+| `ANTHROPIC_MODEL` | No | `claude-sonnet-4-6` | Claude model for LLM scoring |
+
+If no cloud variables are set, scoring runs 100% locally (requires Python dependencies installed).
 
 ### How It Works Under the Hood
 
 The plugin uses slash commands (Markdown files in `commands/`) that define complex, multi-step workflows. When you type `/resume-builder:resume` followed by a job description, it loads the prompt template and `$ARGUMENTS` gets replaced with your input.
 
-The MCP server (`mcp_scorer.py`) auto-starts via `.mcp.json` when the plugin loads, exposing scoring functions as native tools that Claude can call directly — no manual server startup needed.
+The MCP server (`mcp_scorer.py`) auto-starts via `.mcp.json` when the plugin loads, exposing scoring functions as native tools that Claude can call directly — no manual server startup needed. In **v3.0**, the MCP server operates as a thin client:
+
+1. **Cloud-first:** Sends scoring requests to the cloud API (fast, no local model loading)
+2. **Local fallback:** If cloud is unavailable or not configured, loads SBERT model locally and scores on your machine
+3. **BYOK for LLM:** LLM scoring always runs locally using your own Anthropic API key
 
 These commands turn Claude into a specialized resume optimization agent that:
 - Reads your master resume and the target job description
@@ -338,7 +425,12 @@ Resume-Builder/
 ├── hooks/                      # Plugin hooks
 │   └── hooks.json              # SessionStart: checks if scoring is ready
 ├── .mcp.json                   # MCP server config (auto-starts scorer)
-├── mcp_scorer.py               # MCP scoring server (5 tools via FastMCP)
+├── mcp_scorer.py               # MCP scoring server (6 tools, cloud-first thin client)
+├── cloud/                      # Cloud API infrastructure (not in public repo)
+│   ├── config.py               # Environment-based settings
+│   ├── auth.py                 # JWT + SQLite auth and usage tracking
+│   ├── billing.py              # Stripe subscription management
+│   └── client.py               # HTTP client for cloud-first MCP scoring
 ├── data/                       # Reference databases for scoring
 │   ├── keywords_*.json         # Domain-specific keyword databases (6 domains)
 │   ├── skill_taxonomy.json     # Skill categories with decay constants
@@ -349,7 +441,8 @@ Resume-Builder/
 ├── ats_scorer.py               # ATS scoring engine (2,800+ lines)
 ├── hr_scorer.py                # HR scoring engine (2,900+ lines)
 ├── llm_scorer.py               # Claude-powered rubric scorer
-├── scorer_server.py            # FastAPI REST API for scoring (standalone)
+├── scorer_server.py            # FastAPI REST API (v3.0 — auth, usage, billing)
+├── pii_redactor.py             # PII redaction via Presidio (pre-LLM API calls)
 ├── docx_generator.py           # ATS/Workday-compliant DOCX generator
 ├── orchestration_state.py      # Multi-agent state management (DAG)
 ├── tracker_utils.py            # Excel application tracker utilities
@@ -416,15 +509,56 @@ The DOCX generator produces files optimized for Applicant Tracking Systems (Work
 
 ## API Endpoints
 
-When running the scorer server (`python scorer_server.py --port 8100`):
+The scoring API runs locally (`python scorer_server.py --port 8100`) or is hosted at `https://resume-scorer.fly.dev`.
+
+### Scoring Endpoints
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/health` | GET | No | Server health and version info |
+| `/score/ats` | POST | Yes | ATS scoring (8 weighted components) |
+| `/score/hr` | POST | Yes | HR recruiter simulation |
+| `/score/both` | POST | Yes | ATS + HR combined in one call |
+| `/score/llm` | POST | Yes | LLM scoring via Claude (cloud: requires ANTHROPIC_API_KEY on server) |
+| `/score/combined` | POST | Yes | All 3 blended (70% rules / 30% LLM) |
+| `/score/batch` | POST | Yes | Score multiple resume/JD pairs |
+| `/explain` | POST | Yes | Detailed score explanation |
+
+### Auth & Billing Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Server health check |
-| `/score/ats` | POST | ATS scoring (multipart: resume + jd files) |
-| `/score/hr` | POST | HR scoring (multipart: resume + jd files) |
-| `/score/llm` | POST | LLM scoring via Claude (requires API key) |
-| `/score/combined` | POST | All three scorers combined |
+| `/auth/register` | POST | Create account (email + password) |
+| `/auth/login` | POST | Login and get JWT token |
+| `/auth/api-key` | POST | Create an API key (requires JWT) |
+| `/auth/usage` | GET | Check usage stats and remaining scores |
+| `/billing/checkout` | POST | Start Stripe checkout for Pro upgrade |
+| `/billing/webhook` | POST | Stripe webhook handler |
+| `/billing/portal` | POST | Stripe customer portal |
+
+### Authentication
+
+Scoring endpoints accept authentication via:
+- **JWT Bearer token:** `Authorization: Bearer <token>` (from `/auth/login`)
+- **API key:** `X-API-Key: rb_...` (from `/auth/api-key`)
+
+Free tier: **5 total scores**. Pro tier: **unlimited** (Stripe subscription).
+
+### Example: Score a Resume
+
+```bash
+# With API key
+curl -X POST https://resume-scorer.fly.dev/score/ats \
+  -H "X-API-Key: rb_your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{"resume_text": "Your resume text...", "jd_text": "Job description text..."}'
+
+# With JWT token
+curl -X POST https://resume-scorer.fly.dev/score/both \
+  -H "Authorization: Bearer <your-jwt-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"resume_text": "Your resume text...", "jd_text": "Job description text..."}'
+```
 
 ---
 
@@ -434,11 +568,14 @@ When running the scorer server (`python scorer_server.py --port 8100`):
 |-----------|------------|
 | AI Agent Framework | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) / [Claude Cowork](https://claude.ai) |
 | LLM | [Claude](https://www.anthropic.com/claude) (Anthropic) |
-| MCP Server | [FastMCP 3.0](https://gofastmcp.com/) (auto-starts with plugin) |
+| MCP Server | [FastMCP 3.0](https://gofastmcp.com/) (auto-starts with plugin, cloud-first thin client) |
 | Embeddings | [Sentence Transformers](https://sbert.net/) (all-MiniLM-L6-v2) |
 | NLP | NLTK (lemmatization), TextStat (readability) |
 | Search | BM25Plus (rank-bm25), NetworkX (skill graphs) |
-| API Server | FastAPI + Uvicorn (standalone mode) |
+| API Server | FastAPI + Uvicorn |
+| Cloud Hosting | [Fly.io](https://fly.io) (auto-stop/start, persistent volume) |
+| Auth | JWT (PyJWT) + SQLite-backed API keys |
+| Billing | [Stripe](https://stripe.com) (subscription management) |
 | Document Generation | python-docx |
 | PDF Parsing | pdfplumber |
 | Tracking | openpyxl (Excel) |
@@ -494,7 +631,7 @@ This tool works for **any profession**. The ATS scorer auto-detects the job doma
 | **Healthcare** | Nurse Manager, Quality Director, Health Administrator |
 | **General** | Any role not matching a specific domain — uses universal scoring |
 
-The master resume can be from any field. Simply create your `YOUR_MASTER_RESUME.md` with your complete work history in the Workday-compatible format shown above, and the system will automatically detect your domain and the target role's domain to apply appropriate scoring weights.
+The master resume can be from any field. Simply create your master resume (`.docx`, `.pdf`, `.md`, or `.txt`) with your complete work history, set the path in `config.json`, and the system will automatically detect your domain and the target role's domain to apply appropriate scoring weights.
 
 ---
 

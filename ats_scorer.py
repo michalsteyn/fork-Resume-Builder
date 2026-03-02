@@ -120,6 +120,17 @@ try:
 except ImportError:
     TEXTSTAT_AVAILABLE = False
 
+# O*NET taxonomy for keyword validation (§ skill filtering)
+try:
+    from taxonomy.onet_loader import is_recognized_skill, get_all_skills, get_skills_for_domain, merge_with_domain_keywords
+    ONET_AVAILABLE = True
+except ImportError:
+    ONET_AVAILABLE = False
+    def is_recognized_skill(term): return False
+    def get_all_skills(): return set()
+    def get_skills_for_domain(domain): return set()
+    def merge_with_domain_keywords(domain, dkw): return set(str(k).lower() for k in dkw.keys())
+
 # Load data files
 DATA_DIR = Path(__file__).parent / "data"
 
@@ -186,67 +197,114 @@ STOP_WORDS = {
     'among', 'around', 'behind', 'beyond', 'like', 'near', 'since', 'upon', 'based'
 }
 
-# High-value PV/pharma keywords with weights (Healthcare/Clinical/Pharma focus)
-PV_KEYWORDS = {
-    # Pharmacovigilance & Safety
-    'pharmacovigilance': 3, 'pv': 3, 'safety': 2, 'signal detection': 3,
-    'risk management': 3, 'benefit-risk': 3, 'adverse event': 3, 'ae': 2,
-    'sae': 2, 'serious adverse event': 3, 'psur': 3, 'dsur': 3, 'rmp': 3,
-    'periodic safety': 3, 'safety surveillance': 3, 'aggregate safety': 3,
-    'medical monitoring': 2, 'clinical judgment': 2, 'health authority': 2,
-    'safety management team': 3, 'smt': 2,
-
-    # Regulatory
-    'regulatory': 2, 'fda': 2, 'ema': 2, 'ich': 2, 'gcp': 2, 'glp': 2, 'gmp': 2,
-    'submission': 2, 'ind': 2, 'nda': 2, 'bla': 2, 'pma': 2, '510k': 2,
-
-    # Clinical Trials
-    'protocol': 2, 'clinical development': 2, 'clinical trials': 3,
-    'phase i': 2, 'phase ii': 2, 'phase iii': 2, 'phase iv': 2,
-    'irb': 2, 'iec': 2, 'informed consent': 2, 'crf': 2, 'ecrf': 2,
-
-    # Clinical Operations
-    'clinical operations': 3, 'site management': 2, 'patient enrollment': 2,
-    'data management': 2, 'edc': 2, 'ctms': 2, 'iwrs': 2,
-
-    # Healthcare IT & EMR
-    'epic': 3, 'cerner': 3, 'meditech': 2, 'emr': 2, 'ehr': 2,
-    'clinical documentation': 3, 'health informatics': 2, 'interoperability': 2,
-    'hl7': 2, 'fhir': 2, 'hipaa': 2,
-
-    # AI/ML in Healthcare
-    'ambient ai': 3, 'clinical ai': 3, 'medical ai': 2, 'nlp': 2,
-    'machine learning': 2, 'deep learning': 2, 'predictive analytics': 2,
-
-    # Medical/Clinical Expertise
-    'medical officer': 2, 'safety officer': 3, 'kol': 2, 'physician': 2,
-    'm.d.': 3, 'md': 3, 'board certified': 2, 'clinical': 1, 'clinician': 2,
-    'patient care': 2, 'patient safety': 3, 'quality improvement': 2,
-
-    # Analytics & Research
-    'data mining': 2, 'epidemiology': 2, 'safety profile': 2, 'literature': 1,
-    'biostatistics': 2, 'outcomes research': 2, 'real world evidence': 3,
-    'rwe': 2, 'cross-functional': 2
+# JD boilerplate words — common in job descriptions but NOT meaningful skills.
+# These are filtered out to prevent noise keywords like "job", "position", "team"
+# from inflating ATS scores. Identified via O*NET crosswalk as non-skill terms.
+JD_BOILERPLATE_WORDS = {
+    'position', 'job', 'role', 'opportunity', 'candidate', 'applicant',
+    'requirement', 'qualification', 'responsibility', 'duty', 'duties',
+    'company', 'organization', 'employer', 'employee', 'team', 'department',
+    'salary', 'compensation', 'benefits', 'package', 'competitive',
+    'equal', 'eoe', 'diversity', 'inclusion',
+    'preferred', 'required', 'desired', 'minimum', 'maximum',
+    'experience', 'year', 'years', 'month', 'months',
+    'able', 'ability', 'capable', 'proficient', 'excellent',
+    'strong', 'proven', 'demonstrated', 'successful', 'effective',
+    'work', 'working', 'environment', 'office', 'remote', 'hybrid',
+    'full', 'time', 'part', 'contract', 'permanent', 'temporary',
+    'apply', 'submit', 'resume', 'cover', 'letter', 'application',
+    'please', 'note', 'must', 'shall', 'ensure', 'provide',
+    'support', 'assist', 'help', 'maintain', 'manage', 'develop',
+    'report', 'review', 'prepare', 'coordinate', 'oversee',
+    'retail', 'location', 'travel', 'schedule', 'shift',
+    'ideal', 'looking', 'seeking', 'join', 'growing',
+    'dynamic', 'innovative', 'exciting', 'passionate', 'motivated',
+    'self', 'starter', 'driven', 'oriented', 'focused',
+    'detail', 'details', 'fast', 'paced', 'multi', 'task',
+    'independently', 'level', 'senior', 'junior', 'entry', 'mid',
+    'include', 'includes', 'including', 'involve', 'involves',
+    'perform', 'performs', 'responsible', 'various', 'multiple',
 }
 
-# Healthcare-specific multi-word phrases (for phrase matching)
-CLINICAL_PHRASES = [
-    'clinical trials', 'clinical research', 'clinical operations',
-    'clinical documentation', 'clinical workflow', 'clinical decision support',
-    'patient safety', 'patient care', 'patient outcomes', 'patient enrollment',
-    'adverse event', 'serious adverse event', 'safety monitoring',
-    'risk management', 'signal detection', 'benefit-risk assessment',
-    'regulatory submission', 'regulatory compliance', 'regulatory affairs',
-    'data management', 'data analysis', 'data quality',
-    'quality assurance', 'quality improvement', 'quality control',
-    'machine learning', 'artificial intelligence', 'natural language processing',
-    'electronic health record', 'electronic medical record',
-    'health informatics', 'medical informatics', 'clinical informatics',
-    'stakeholder management', 'cross-functional', 'change management',
-    'project management', 'program management', 'team leadership',
-    'epic emr', 'epic ehr', 'epic implementation', 'epic optimization',
-    'ambient ai', 'clinical ai', 'ai-powered', 'ai-driven'
-]
+# Merge boilerplate words into STOP_WORDS for unified filtering
+STOP_WORDS = STOP_WORDS | JD_BOILERPLATE_WORDS
+
+# =============================================================================
+# DOMAIN KEYWORD LOADING — Dynamic from data/keywords_{domain}.json files
+# Replaces hardcoded PV_KEYWORDS with domain-aware keyword sets
+# =============================================================================
+
+# Domain-to-filename mapping
+_DOMAIN_KEYWORD_FILES = {
+    'clinical_research': 'keywords_clinical.json',
+    'pharma_biotech': 'keywords_clinical.json',
+    'technology': 'keywords_technology.json',
+    'finance': 'keywords_finance.json',
+    'consulting': 'keywords_consulting.json',
+    'healthcare': 'keywords_healthcare.json',
+    'general': 'keywords_general.json',
+}
+
+# Cache for loaded domain keywords
+_domain_keywords_cache = {}
+
+def load_domain_keywords(domain='clinical_research'):
+    """
+    Load domain-specific keywords from JSON data files.
+
+    Returns:
+        dict: {term: weight} mapping for the specified domain
+    """
+    if domain in _domain_keywords_cache:
+        return _domain_keywords_cache[domain]
+
+    filename = _DOMAIN_KEYWORD_FILES.get(domain, 'keywords_general.json')
+    raw_data = load_json_data(filename, {})
+
+    # Flatten the categorized structure into {term: weight}
+    keywords = {}
+    for category_key, category_data in raw_data.items():
+        if category_key == '_metadata':
+            continue
+        if isinstance(category_data, dict):
+            for term, info in category_data.items():
+                if isinstance(info, dict):
+                    keywords[term.lower()] = info.get('weight', 1)
+                elif isinstance(info, (int, float)):
+                    keywords[term.lower()] = info
+
+    _domain_keywords_cache[domain] = keywords
+    return keywords
+
+
+def load_domain_phrases(domain='clinical_research'):
+    """
+    Extract multi-word phrases from domain keyword JSON files.
+
+    Returns:
+        list: Multi-word phrases for the specified domain
+    """
+    keywords = load_domain_keywords(domain)
+    return [term for term in keywords.keys() if ' ' in term]
+
+
+def get_domain_keywords_for_text(text):
+    """
+    Auto-detect domain from text and return appropriate keyword set.
+
+    Returns:
+        tuple: (keywords_dict, phrases_list, detected_domain)
+    """
+    domain, _, _ = detect_domain(text)
+    keywords = load_domain_keywords(domain)
+    phrases = load_domain_phrases(domain)
+    return keywords, phrases, domain
+
+
+# Legacy aliases — PV_KEYWORDS and CLINICAL_PHRASES now load from clinical domain JSON
+# These are loaded at module level for backward compatibility with code that references them
+PV_KEYWORDS = load_domain_keywords('clinical_research')
+CLINICAL_PHRASES = load_domain_phrases('clinical_research')
 
 
 # ============== Enhanced NLP Functions ==============
@@ -688,22 +746,50 @@ def detect_keyword_stuffing(text: str) -> Tuple[bool, float, Dict[str, Any]]:
 
 
 # =============================================================================
-# §3.1.2 - READABILITY METRICS (Flesch-Kincaid)
+# §3.1.2 - READABILITY METRICS (Flesch-Kincaid + Dale-Chall for technical)
 # =============================================================================
 
-def calculate_readability(text: str) -> Tuple[float, str, Dict[str, Any]]:
-    """
-    Calculate readability metrics using Flesch-Kincaid (§3.1.2).
+# Technical domains where Dale-Chall is preferred over Flesch-Kincaid.
+# FK penalizes legitimate domain jargon ("pharmacokinetics", "heteroscedasticity")
+# while Dale-Chall uses a familiar-word list that better handles technical writing.
+_DALE_CHALL_DOMAINS = {'clinical_research', 'pharma_biotech', 'technology'}
 
-    Target: Business Professional level (Grade 10-12)
-    - Below Grade 8: Too simple (appears juvenile)
-    - Above Grade 14: Too complex (reduces skimming speed)
+
+def _calculate_dale_chall_score(dc_score: float) -> float:
+    """Convert Dale-Chall readability score to 0-100 (optimal at 7.0-8.0 for technical docs)."""
+    if 7.0 <= dc_score <= 8.0:
+        return 100  # Optimal for technical professional docs
+    elif 6.0 <= dc_score < 7.0:
+        return 80 + (dc_score - 6.0) * 20  # 80-100
+    elif 8.0 < dc_score <= 9.0:
+        return 100 - (dc_score - 8.0) * 20  # 100-80
+    elif dc_score < 6.0:
+        return max(40, 80 - (6.0 - dc_score) * 15)  # Too simple
+    else:  # > 9.0
+        return max(30, 80 - (dc_score - 9.0) * 15)  # Too complex
+
+
+def calculate_readability(text: str, domain: str = None) -> Tuple[float, str, Dict[str, Any]]:
+    """
+    Calculate readability metrics (§3.1.2).
+
+    Uses Dale-Chall for technical domains (clinical_research, pharma_biotech, technology)
+    to avoid penalizing legitimate domain jargon. Uses Flesch-Kincaid for other domains.
+
+    Dale-Chall target: 7.0-8.0 (technical professional level)
+    Flesch-Kincaid target: Grade 10-12 (business professional level)
+
+    Args:
+        text: Text to analyze
+        domain: Optional domain hint. If provided and technical, uses Dale-Chall.
 
     Returns:
-        score: 0-100 (100 = optimal readability for business)
+        score: 0-100 (100 = optimal readability)
         grade_level: String description
         details: Dictionary with all metrics
     """
+    use_dale_chall = domain in _DALE_CHALL_DOMAINS if domain else False
+
     if not TEXTSTAT_AVAILABLE:
         # Fallback: simple readability estimation
         words = text.split()
@@ -724,33 +810,60 @@ def calculate_readability(text: str) -> Tuple[float, str, Dict[str, Any]]:
         }
 
     try:
-        # Use textstat for comprehensive analysis
+        # Always compute both for the details dict
         fk_grade = textstat.flesch_kincaid_grade(text)
         flesch_ease = textstat.flesch_reading_ease(text)
         gunning_fog = textstat.gunning_fog(text)
         smog = textstat.smog_index(text)
 
-        # Calculate optimal score (Grade 10-12 is optimal)
-        score = calculate_readability_score(fk_grade)
+        if use_dale_chall:
+            # Dale-Chall for technical domains — doesn't penalize domain jargon
+            dc_score = textstat.dale_chall_readability_score(text)
+            score = _calculate_dale_chall_score(dc_score)
 
-        # Determine grade level description
-        if fk_grade < 8:
-            grade_desc = f"Grade {fk_grade:.1f} (Too Simple)"
-        elif fk_grade <= 12:
-            grade_desc = f"Grade {fk_grade:.1f} (Optimal - Business Professional)"
-        elif fk_grade <= 14:
-            grade_desc = f"Grade {fk_grade:.1f} (Slightly Complex)"
+            if dc_score < 6.0:
+                grade_desc = f"Dale-Chall {dc_score:.1f} (Too Simple)"
+            elif dc_score <= 8.0:
+                grade_desc = f"Dale-Chall {dc_score:.1f} (Optimal - Technical Professional)"
+            elif dc_score <= 9.0:
+                grade_desc = f"Dale-Chall {dc_score:.1f} (Slightly Complex)"
+            else:
+                grade_desc = f"Dale-Chall {dc_score:.1f} (Too Complex)"
+
+            details = {
+                'available': True,
+                'method': 'dale_chall',
+                'domain': domain,
+                'dale_chall_score': round(dc_score, 1),
+                'flesch_kincaid_grade': round(fk_grade, 1),
+                'flesch_reading_ease': round(flesch_ease, 1),
+                'gunning_fog_index': round(gunning_fog, 1),
+                'smog_index': round(smog, 1),
+                'optimal_range': '7.0-8.0 (Dale-Chall)'
+            }
         else:
-            grade_desc = f"Grade {fk_grade:.1f} (Too Complex - Academic)"
+            # Flesch-Kincaid for non-technical domains
+            score = calculate_readability_score(fk_grade)
 
-        details = {
-            'available': True,
-            'flesch_kincaid_grade': round(fk_grade, 1),
-            'flesch_reading_ease': round(flesch_ease, 1),
-            'gunning_fog_index': round(gunning_fog, 1),
-            'smog_index': round(smog, 1),
-            'optimal_range': '10-12'
-        }
+            if fk_grade < 8:
+                grade_desc = f"Grade {fk_grade:.1f} (Too Simple)"
+            elif fk_grade <= 12:
+                grade_desc = f"Grade {fk_grade:.1f} (Optimal - Business Professional)"
+            elif fk_grade <= 14:
+                grade_desc = f"Grade {fk_grade:.1f} (Slightly Complex)"
+            else:
+                grade_desc = f"Grade {fk_grade:.1f} (Too Complex - Academic)"
+
+            details = {
+                'available': True,
+                'method': 'flesch_kincaid',
+                'domain': domain,
+                'flesch_kincaid_grade': round(fk_grade, 1),
+                'flesch_reading_ease': round(flesch_ease, 1),
+                'gunning_fog_index': round(gunning_fog, 1),
+                'smog_index': round(smog, 1),
+                'optimal_range': '10-12 (FK Grade)'
+            }
 
         return score, grade_desc, details
 
@@ -1706,16 +1819,16 @@ def strip_pii_for_bias_audit(resume_text: str) -> Tuple[str, Dict[str, Any]]:
     """
     Strip PII (Personally Identifiable Information) for bias-free scoring (§5.2).
 
-    Removes or masks:
-    - Names (first line assumption for resumes)
-    - Addresses (location bias)
-    - Graduation years (age proxy)
-    - Gender indicators
+    Uses pii_redactor (Presidio-backed when available, regex fallback otherwise)
+    for name/email/phone/address/URL redaction, then applies bias-audit-specific
+    stripping for graduation years and gender indicators.
 
     Returns:
         cleaned_text: Text with PII stripped
         stripped_info: Dictionary of what was stripped (for audit logging)
     """
+    from pii_redactor import redact_text
+
     stripped = {
         'name_stripped': False,
         'address_stripped': False,
@@ -1723,45 +1836,34 @@ def strip_pii_for_bias_audit(resume_text: str) -> Tuple[str, Dict[str, Any]]:
         'gender_indicators_stripped': []
     }
 
-    lines = resume_text.split('\n')
+    # Phase 1: Core PII redaction via pii_redactor (names, emails, phones, etc.)
+    cleaned_text = redact_text(resume_text)
+
+    # Check what was redacted
+    if '<PERSON>' in cleaned_text:
+        stripped['name_stripped'] = True
+    if '<ADDRESS>' in cleaned_text:
+        stripped['address_stripped'] = True
+
+    # Phase 2: Bias-audit-specific stripping (graduation years, gender indicators)
+
+    # Strip zip codes
+    zip_pattern = r'\b\d{5}(-\d{4})?\b'
+    cleaned_text = re.sub(zip_pattern, '[ZIP]', cleaned_text)
+
+    # Strip graduation years (age proxy) - years between 1960-2030
+    lines = cleaned_text.split('\n')
     cleaned_lines = []
-
-    # Strip potential name (usually first non-empty line)
-    name_stripped = False
-    for i, line in enumerate(lines):
-        line_stripped = line.strip()
-
-        # First substantial line is likely the name
-        if not name_stripped and line_stripped and len(line_stripped) < 50:
-            # Check if it looks like a name (mostly letters, possibly with credentials)
-            if re.match(r'^[A-Za-z\s,\.]+$', line_stripped.replace(',', '').replace('.', '')):
-                cleaned_lines.append("[NAME REDACTED]")
-                stripped['name_stripped'] = True
-                name_stripped = True
-                continue
-
-        # Strip address patterns (street numbers, zip codes)
-        address_pattern = r'\b\d+\s+[A-Za-z]+\s+(Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Boulevard|Blvd)\b'
-        if re.search(address_pattern, line, re.IGNORECASE):
-            line = re.sub(address_pattern, '[ADDRESS REDACTED]', line, flags=re.IGNORECASE)
-            stripped['address_stripped'] = True
-
-        # Strip zip codes
-        zip_pattern = r'\b\d{5}(-\d{4})?\b'
-        if re.search(zip_pattern, line):
-            line = re.sub(zip_pattern, '[ZIP]', line)
-
-        # Strip graduation years (age proxy) - years between 1960-2030
-        grad_year_pattern = r'\b(19[6-9]\d|20[0-3]\d)\b'
+    grad_year_pattern = r'\b(19[6-9]\d|20[0-3]\d)\b'
+    for line in lines:
         grad_years = re.findall(grad_year_pattern, line)
         if grad_years:
-            # Only strip if in education context
             if any(edu in line.lower() for edu in ['degree', 'graduated', 'bachelor', 'master', 'phd', 'university', 'college']):
                 for year in grad_years:
                     stripped['graduation_years_stripped'].append(year)
                 line = re.sub(grad_year_pattern, '[YEAR]', line)
-
         cleaned_lines.append(line)
+    cleaned_text = '\n'.join(cleaned_lines)
 
     # Strip gender indicators throughout
     gender_indicators = [
@@ -1771,7 +1873,6 @@ def strip_pii_for_bias_audit(resume_text: str) -> Tuple[str, Dict[str, Any]]:
         (r'\b(husband|wife|father|mother)\b', '[FAMILY]'),
     ]
 
-    cleaned_text = '\n'.join(cleaned_lines)
     for pattern, replacement in gender_indicators:
         matches = re.findall(pattern, cleaned_text, re.IGNORECASE)
         if matches:
@@ -1958,9 +2059,53 @@ def clean_text(text):
     return text.strip()
 
 
+def is_valid_skill(term, domain=None):
+    """Check if a term is a recognized skill via O*NET + domain keywords + skill taxonomy.
+
+    Validates against three sources:
+    1. O*NET skill taxonomy (data/onet_skills.json)
+    2. Domain-specific keywords (data/keywords_{domain}.json)
+    3. Existing skill taxonomy / synonym map
+
+    Args:
+        term: Keyword to validate (case-insensitive).
+        domain: Optional domain for domain-specific validation.
+
+    Returns:
+        True if the term is a recognized skill, False if likely noise.
+    """
+    t = term.lower().strip()
+
+    # Check O*NET taxonomy
+    if ONET_AVAILABLE and is_recognized_skill(t):
+        return True
+
+    # Check existing SYNONYM_MAP (from skill_taxonomy.json)
+    if t in SYNONYM_MAP:
+        return True
+
+    # Check domain keywords
+    if domain:
+        domain_kw = load_domain_keywords(domain)
+        if t in domain_kw:
+            return True
+    else:
+        # Check all domains
+        for d in _DOMAIN_KEYWORD_FILES:
+            dkw = load_domain_keywords(d)
+            if t in dkw:
+                return True
+
+    return False
+
+
 def extract_keywords(text, min_length=2, use_lemmatization=True, expand_acro=True):
     """
     Extract meaningful keywords from text with enhanced NLP.
+
+    Uses O*NET taxonomy validation to filter noise words. Only returns
+    terms that are recognized skills, domain keywords, or appear in the
+    skill taxonomy synonym map.
 
     Args:
         text: Input text
@@ -1975,48 +2120,81 @@ def extract_keywords(text, min_length=2, use_lemmatization=True, expand_acro=Tru
     cleaned = clean_text(text)
     words = cleaned.split()
 
-    # Basic filtering
-    keywords = [w for w in words if w not in STOP_WORDS and len(w) >= min_length]
+    # Basic filtering (stop words + boilerplate)
+    candidates = [w for w in words if w not in STOP_WORDS and len(w) >= min_length]
 
     # Add lemmatized forms for better matching
     if use_lemmatization:
         lemmatized = set()
-        for w in keywords:
+        for w in candidates:
             lemmatized.add(w)
             lemma = lemmatize_word(w)
             if lemma != w:
                 lemmatized.add(lemma)
-        keywords = list(lemmatized)
+        candidates = list(lemmatized)
+
+    # Validate against O*NET + domain keywords + skill taxonomy
+    if ONET_AVAILABLE:
+        keywords = [w for w in candidates if is_valid_skill(w)]
+    else:
+        # Fallback: original behavior if O*NET not available
+        keywords = candidates
 
     return keywords
 
 
-def extract_phrases(text):
+def extract_phrases(text, domain=None):
     """
-    Extract important multi-word phrases.
-    Includes both PV/pharma keywords and clinical-specific phrases.
+    Extract important multi-word phrases using domain-aware keyword sets.
+
+    Args:
+        text: Text to extract phrases from
+        domain: Optional domain override. If None, uses all loaded domain keywords.
     """
     cleaned = clean_text(text)
     phrases = []
 
-    # Check PV_KEYWORDS (industry-specific weighted terms)
-    for phrase in PV_KEYWORDS.keys():
-        if ' ' in phrase and phrase in cleaned:  # Only multi-word phrases
-            phrases.append(phrase)
+    if domain:
+        # Use domain-specific keywords and phrases
+        domain_kw = load_domain_keywords(domain)
+        domain_phrases = load_domain_phrases(domain)
 
-    # Check CLINICAL_PHRASES (healthcare-specific phrases)
-    for phrase in CLINICAL_PHRASES:
-        if phrase in cleaned and phrase not in phrases:
-            phrases.append(phrase)
+        for phrase in domain_kw.keys():
+            if ' ' in phrase and phrase in cleaned:
+                phrases.append(phrase)
+
+        for phrase in domain_phrases:
+            if phrase in cleaned and phrase not in phrases:
+                phrases.append(phrase)
+    else:
+        # Fallback: check PV_KEYWORDS and CLINICAL_PHRASES (legacy behavior)
+        for phrase in PV_KEYWORDS.keys():
+            if ' ' in phrase and phrase in cleaned:
+                phrases.append(phrase)
+
+        for phrase in CLINICAL_PHRASES:
+            if phrase in cleaned and phrase not in phrases:
+                phrases.append(phrase)
 
     return phrases
 
 
-def extract_jd_keywords(jd_text):
+def extract_jd_keywords(jd_text, domain=None):
     """
     Extract important keywords and phrases from job description.
-    Enhanced with acronym expansion and lemmatization.
+    Enhanced with acronym expansion, lemmatization, domain-aware filtering,
+    and O*NET taxonomy validation.
+
+    Args:
+        jd_text: Job description text
+        domain: Optional domain override. If None, auto-detects from JD.
     """
+    # Auto-detect domain from JD if not provided
+    if domain is None:
+        domain, _, _ = detect_domain(jd_text)
+
+    domain_kw = load_domain_keywords(domain)
+
     # Expand acronyms to capture full forms
     expanded_jd = expand_acronyms(jd_text)
     cleaned = clean_text(expanded_jd)
@@ -2028,23 +2206,101 @@ def extract_jd_keywords(jd_text):
     # Count frequency
     word_counts = Counter(keywords)
 
-    # Get top keywords (appearing more than once or in PV_KEYWORDS or high-value)
+    # Get top keywords — validated against O*NET + domain keywords + skill taxonomy
     important_keywords = []
-    pv_terms = set(str(k).lower() for k in PV_KEYWORDS.keys())
+    domain_terms = set(str(k).lower() for k in domain_kw.keys())
 
     for word, count in word_counts.most_common(100):
-        # Include if: appears multiple times, is a PV/pharma term, or is in skill taxonomy
-        if count > 1 or word in pv_terms or word in SYNONYM_MAP:
+        # Include if: recognized skill OR (appears 2+ times AND passes O*NET check)
+        if word in domain_terms or word in SYNONYM_MAP:
+            important_keywords.append(word)
+        elif ONET_AVAILABLE and is_valid_skill(word, domain=domain):
+            important_keywords.append(word)
+        elif count > 1 and not ONET_AVAILABLE:
+            # Fallback: original behavior if O*NET not available
             important_keywords.append(word)
 
-    # Extract phrases
-    phrases = extract_phrases(jd_text)
+    # Extract phrases (domain-aware)
+    phrases = extract_phrases(jd_text, domain=domain)
+
+    # all_keywords also validated through O*NET when available
+    if ONET_AVAILABLE:
+        validated_all = [w for w in set(keywords) if is_valid_skill(w, domain=domain)
+                         or w in domain_terms or w in SYNONYM_MAP]
+    else:
+        validated_all = list(set(keywords))
 
     return {
         'keywords': important_keywords[:50],
         'phrases': phrases,
-        'all_keywords': list(set(keywords))
+        'all_keywords': validated_all
     }
+
+
+def check_job_title_match(resume_text, jd_text):
+    """
+    Check if the JD job title appears in the resume (§10.6x callback data).
+
+    Returns:
+        score (float): 100 if exact title in header/summary (top 20% of resume),
+                       50 if found elsewhere in resume, 0 if missing.
+        title (str): The extracted job title from JD, or empty string.
+    """
+    # Extract job title from JD - look for common patterns
+    jd_lower = jd_text.lower().strip()
+    title = ""
+
+    # Pattern 1: "Job Title: <title>" or "Position: <title>" or "Role: <title>"
+    title_patterns = [
+        r'(?:job\s*title|position|role)\s*[:：]\s*(.+?)(?:\n|$)',
+        r'^(.+?)\s*(?:\n|$)',  # First line of JD as fallback
+    ]
+
+    for pattern in title_patterns:
+        match = re.search(pattern, jd_lower, re.MULTILINE)
+        if match:
+            candidate_title = match.group(1).strip()
+            # Skip if it looks like a company name or is too long
+            if len(candidate_title) > 5 and len(candidate_title) < 80:
+                title = candidate_title
+                break
+
+    if not title:
+        return 0, ""
+
+    # Clean the title
+    title_clean = re.sub(r'[^\w\s]', ' ', title).strip()
+    title_clean = re.sub(r'\s+', ' ', title_clean).lower()
+
+    if len(title_clean) < 3:
+        return 0, ""
+
+    resume_lower = resume_text.lower()
+    resume_lines = resume_lower.split('\n')
+
+    # Top 20% of resume = header/summary area
+    top_section_end = max(1, len(resume_lines) // 5)
+    top_section = '\n'.join(resume_lines[:top_section_end])
+
+    # Check for exact title match in header/summary
+    if title_clean in top_section:
+        return 100, title_clean
+
+    # Check for exact title match anywhere in resume
+    if title_clean in resume_lower:
+        return 50, title_clean
+
+    # Check for partial match (all significant words present in same section)
+    title_words = [w for w in title_clean.split() if w not in STOP_WORDS and len(w) > 2]
+    if title_words:
+        # Check if all title words appear in top section
+        if all(w in top_section for w in title_words):
+            return 80, title_clean
+        # Check if all title words appear anywhere
+        if all(w in resume_lower for w in title_words):
+            return 40, title_clean
+
+    return 0, title_clean
 
 
 def calculate_keyword_match(resume_text, jd_text):
@@ -2081,13 +2337,21 @@ def calculate_keyword_match(resume_text, jd_text):
     return match_pct, all_matched[:30], list(missing)[:20]
 
 
-def calculate_phrase_match(resume_text, jd_text):
+def calculate_phrase_match(resume_text, jd_text, domain=None):
     """
-    Calculate important phrase matches.
-    Includes both PV/pharma and clinical-specific phrases.
+    Calculate important phrase matches using domain-aware phrase sets.
+
+    Args:
+        resume_text: Resume content
+        jd_text: Job description content
+        domain: Optional domain override. If None, auto-detects from JD.
     """
-    jd_phrases = set(extract_phrases(jd_text))
-    resume_phrases = set(extract_phrases(resume_text))
+    # Auto-detect domain from JD if not provided
+    if domain is None:
+        domain, _, _ = detect_domain(jd_text)
+
+    jd_phrases = set(extract_phrases(jd_text, domain=domain))
+    resume_phrases = set(extract_phrases(resume_text, domain=domain))
 
     if not jd_phrases:
         return 100, [], []  # No specific phrases required
@@ -2099,11 +2363,23 @@ def calculate_phrase_match(resume_text, jd_text):
     return match_pct, list(matched), list(missing)
 
 
-def calculate_weighted_score(resume_text, jd_text):
+def calculate_weighted_score(resume_text, jd_text, domain=None):
     """
-    Calculate weighted score based on high-value healthcare/clinical keywords.
+    Calculate weighted score based on domain-specific industry keywords.
+    Uses domain auto-detection to select the right keyword set.
     Enhanced with acronym expansion for better matching.
+
+    Args:
+        resume_text: Resume content
+        jd_text: Job description content
+        domain: Optional domain override. If None, auto-detects from JD.
     """
+    # Auto-detect domain from JD if not provided
+    if domain is None:
+        domain, _, _ = detect_domain(jd_text)
+
+    domain_kw = load_domain_keywords(domain)
+
     # Expand acronyms in both texts
     expanded_resume = expand_acronyms(resume_text)
     expanded_jd = expand_acronyms(jd_text)
@@ -2116,7 +2392,7 @@ def calculate_weighted_score(resume_text, jd_text):
     matched_terms = []
     missing_terms = []
 
-    for term, weight in PV_KEYWORDS.items():
+    for term, weight in domain_kw.items():
         if term in cleaned_jd:
             total_weight += weight
             # Check direct match
@@ -2150,34 +2426,42 @@ def calculate_ats_score(resume_text, jd_text, file_path: str = None):
     - §4: Domain auto-detection
     - Lemmatization, acronym expansion, synonym matching
 
-    Scoring Weights (Adaptive based on available features):
-    - Keyword Match: 25%
-    - Clinical Phrases: 15%
-    - Weighted Industry Terms: 20%
-    - Semantic Similarity: 25% (if available, else redistributed)
-    - BM25 Score: 15%
+    Scoring Weights v2.5 (Research-rebalanced):
+    - Keyword Match: 20%
+    - Phrase Match: 25% (exact phrases = 10.6x callbacks)
+    - Weighted Industry Terms: 15%
+    - Semantic Similarity: 10% (reduced — SBERT overestimates ATS)
+    - BM25 Score: 10%
+    - Graph Centrality: 5%
+    - Skill Recency: 5%
+    - Job Title Match: 10% (NEW — 10.6x callback data)
     """
+    # =========================================================================
+    # DOMAIN DETECTION (run first to inform all domain-aware scoring)
+    # =========================================================================
+    domain, domain_confidence, domain_scores = detect_domain(jd_text)
+
     # =========================================================================
     # CORE SCORING (Always Available)
     # =========================================================================
 
-    # Keyword match (25% weight) - with lemmatization & synonyms
+    # Keyword match (20% weight) - with lemmatization & synonyms
     keyword_score, matched_kw, missing_kw = calculate_keyword_match(resume_text, jd_text)
 
-    # Phrase match (15% weight) - clinical/healthcare phrases
-    phrase_score, matched_phrases, missing_phrases = calculate_phrase_match(resume_text, jd_text)
+    # Phrase match (25% weight) - domain-aware multi-word phrases
+    phrase_score, matched_phrases, missing_phrases = calculate_phrase_match(resume_text, jd_text, domain=domain)
 
-    # Weighted industry terms (20% weight) - PV/pharma/clinical terms
-    weighted_score, matched_weighted, missing_weighted = calculate_weighted_score(resume_text, jd_text)
+    # Weighted industry terms (15% weight) - domain-specific keyword weights
+    weighted_score, matched_weighted, missing_weighted = calculate_weighted_score(resume_text, jd_text, domain=domain)
 
-    # BM25 scoring (15% weight) - probabilistic ranking
+    # BM25 scoring (10% weight) - probabilistic ranking
     bm25_score, bm25_details = calculate_bm25_score(resume_text, jd_text)
 
     # =========================================================================
     # ADVANCED SCORING (Optional Dependencies)
     # =========================================================================
 
-    # Semantic similarity (25% weight if available)
+    # Semantic similarity (10% weight if available)
     semantic_score, semantic_details = calculate_semantic_similarity(resume_text, jd_text)
 
     # =========================================================================
@@ -2188,10 +2472,7 @@ def calculate_ats_score(resume_text, jd_text, file_path: str = None):
     is_stuffed, stuffing_score, stuffing_details = detect_keyword_stuffing(resume_text)
 
     # Readability analysis
-    readability_score, readability_grade, readability_details = calculate_readability(resume_text)
-
-    # Domain detection
-    domain, domain_confidence, domain_scores = detect_domain(jd_text)
+    readability_score, readability_grade, readability_details = calculate_readability(resume_text, domain=domain)
 
     # Format risk (if file path provided)
     format_risk = 0
@@ -2215,6 +2496,9 @@ def calculate_ats_score(resume_text, jd_text, file_path: str = None):
     recency_adjusted_score, recency_details = calculate_recency_adjusted_score(
         matched_kw, resume_text, keyword_score
     )
+
+    # Job title match (§research: 10.6x callback increase for exact title match)
+    job_title_score, job_title_extracted = check_job_title_match(resume_text, jd_text)
 
     # Graph-based skill inference (§2.2.2, §8.2)
     inferred_skills = []
@@ -2251,25 +2535,28 @@ def calculate_ats_score(resume_text, jd_text, file_path: str = None):
     adj_bm25 = bm25_score
 
     if SBERT_AVAILABLE and adj_semantic > 0:
-        # Full scoring with semantic similarity
+        # Full scoring with semantic similarity (v2.5 rebalanced weights)
+        # Research: exact phrases = 10.6x callbacks, SBERT overestimates ATS capability
         total_score = (
-            adj_keyword * 0.22 +
-            adj_phrase * 0.13 +
-            adj_weighted * 0.18 +
-            adj_semantic * 0.22 +
-            adj_bm25 * 0.13 +
-            graph_score * 0.07 +  # Graph centrality bonus
-            recency_adjusted_score * 0.05  # Recency factor
+            adj_keyword * 0.20 +      # was 0.22: slight reduction
+            adj_phrase * 0.25 +        # was 0.13: exact phrases = 10.6x callbacks
+            adj_weighted * 0.15 +      # was 0.18: slight reduction
+            adj_semantic * 0.10 +      # was 0.22: SBERT overweighted per research
+            adj_bm25 * 0.10 +          # was 0.13: slight reduction
+            graph_score * 0.05 +       # was 0.07: minor contributor
+            recency_adjusted_score * 0.05 +  # unchanged
+            job_title_score * 0.10     # NEW: 10.6x callback data
         )
     else:
-        # Fallback: redistribute weights
+        # Fallback: redistribute semantic weight proportionally
         total_score = (
-            adj_keyword * 0.30 +
-            adj_phrase * 0.18 +
-            adj_weighted * 0.22 +
-            adj_bm25 * 0.18 +
-            graph_score * 0.07 +
-            recency_adjusted_score * 0.05
+            adj_keyword * 0.23 +       # was 0.30
+            adj_phrase * 0.28 +        # was 0.18: phrase match most important
+            adj_weighted * 0.17 +      # was 0.22
+            adj_bm25 * 0.12 +          # was 0.18
+            graph_score * 0.05 +       # was 0.07
+            recency_adjusted_score * 0.05 +  # unchanged
+            job_title_score * 0.10     # NEW: job title match
         )
 
     # Apply penalties
@@ -2359,7 +2646,8 @@ def calculate_ats_score(resume_text, jd_text, file_path: str = None):
             'networkx_available': NETWORKX_AVAILABLE,
             'acronyms_loaded': len(ACRONYMS),
             'taxonomy_terms': len(SYNONYM_MAP),
-            'clinical_phrases': len(CLINICAL_PHRASES)
+            'domain_phrases': len(load_domain_phrases(domain)),
+            'domain_keywords': len(load_domain_keywords(domain))
         },
 
         # Detailed breakdowns
@@ -2378,6 +2666,12 @@ def calculate_ats_score(resume_text, jd_text, file_path: str = None):
             'inferred_skills': inferred_skills[:10],
             'inference_details': inference_details,
             'centrality_details': graph_details
+        },
+
+        # NEW: Job Title Match (§research: 10.6x callback)
+        'job_title_match': {
+            'score': job_title_score,
+            'extracted_title': job_title_extracted
         },
 
         # NEW: Hidden Text Detection (§2.3.2 enhanced)

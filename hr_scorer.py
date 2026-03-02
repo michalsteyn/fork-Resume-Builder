@@ -1294,6 +1294,92 @@ def score_f_pattern_compliance(resume_text: str, bullets: List[str]) -> Tuple[fl
     return total_score, details
 
 
+def score_text_block_penalty(bullets: List[str], max_lines: int = 3) -> Tuple[float, Dict[str, Any]]:
+    """
+    Penalize excessively long bullet points that hurt readability.
+
+    Bullets longer than max_lines (default 3) get -2 pts each, max -10 total.
+    Recruiters spend 6-7 seconds on initial scan — long text blocks get skipped.
+
+    Returns:
+        penalty: Negative adjustment (0 to -10)
+        details: Dict with offending bullets and their lengths
+    """
+    if not bullets:
+        return 0, {'offending_bullets': 0, 'total_bullets': 0}
+
+    offending = []
+    for i, bullet in enumerate(bullets):
+        # Estimate lines: ~80 chars per line in typical resume format
+        estimated_lines = max(1, len(bullet) / 80)
+        if estimated_lines > max_lines:
+            offending.append({
+                'index': i,
+                'chars': len(bullet),
+                'estimated_lines': round(estimated_lines, 1),
+                'preview': bullet[:60] + '...' if len(bullet) > 60 else bullet
+            })
+
+    penalty = min(10, len(offending) * 2)  # -2 per offending bullet, max -10
+
+    return -penalty, {
+        'offending_bullets': len(offending),
+        'total_bullets': len(bullets),
+        'max_lines_threshold': max_lines,
+        'details': offending[:5]  # Show first 5
+    }
+
+
+def check_page_length_penalty(resume_text: str, domain: str = None) -> Tuple[float, Dict[str, Any]]:
+    """
+    Apply domain-specific page length rules.
+
+    - Finance: strict 1-page rule; >~3000 chars penalized
+    - Healthcare/Clinical: multi-page acceptable; no penalty up to ~6000 chars
+    - General: 1-2 pages; >~5000 chars penalized
+
+    Returns:
+        penalty: Negative adjustment (0 to -5)
+        details: Dict with char count and domain rule applied
+    """
+    char_count = len(resume_text)
+    # Rough page estimate: ~3000 chars/page with formatting
+    estimated_pages = max(1, char_count / 3000)
+
+    if domain in ('finance', 'consulting'):
+        # Strict 1-page rule for finance/consulting
+        if estimated_pages > 1.5:
+            penalty = -5
+            rule = "Finance/consulting: 1-page strongly preferred"
+        else:
+            penalty = 0
+            rule = "Finance/consulting: within 1-page limit"
+    elif domain in ('clinical_research', 'pharma_biotech', 'healthcare'):
+        # Multi-page acceptable for clinical/healthcare (publications, certifications)
+        if estimated_pages > 3:
+            penalty = -3
+            rule = "Healthcare/clinical: 2-3 pages acceptable, exceeds limit"
+        else:
+            penalty = 0
+            rule = "Healthcare/clinical: multi-page acceptable"
+    else:
+        # General: 1-2 pages
+        if estimated_pages > 2.5:
+            penalty = -3
+            rule = "General: 1-2 pages preferred, exceeds limit"
+        else:
+            penalty = 0
+            rule = "General: within page limit"
+
+    return penalty, {
+        'char_count': char_count,
+        'estimated_pages': round(estimated_pages, 1),
+        'domain': domain or 'general',
+        'rule': rule,
+        'penalty': penalty
+    }
+
+
 def score_impact_density(bullets: List[str]) -> Tuple[float, Dict[str, Any]]:
     """
     Score based on density of impact indicators using Bloom's Taxonomy.
@@ -1404,9 +1490,19 @@ def score_impact_density(bullets: List[str]) -> Tuple[float, Dict[str, Any]]:
     if weak_verb_ratio > 0.3:  # More than 30% weak verbs
         score -= 10
 
+    # Metrics density enforcement: penalize if <30% of bullets have metrics
+    metrics_density_pct = (metrics_count / total_bullets * 100) if total_bullets > 0 else 0
+    metrics_density_penalty = 0
+    if metrics_density_pct < 30:
+        # Scale penalty: 0% metrics = -8, 15% = -4, 29% = -1
+        metrics_density_penalty = round(max(1, (30 - metrics_density_pct) / 30 * 8))
+        score -= metrics_density_penalty
+
     stats = {
         'metrics': metrics_count,
         'metrics_magnitude': round(metrics_magnitude_score, 1),
+        'metrics_density_pct': round(metrics_density_pct, 1),
+        'metrics_density_penalty': metrics_density_penalty,
         'strong_verbs': strong_verb_count,
         'total_bullets': total_bullets,
         'density': round(density * 100, 1),
@@ -2144,18 +2240,32 @@ def calculate_penalties(
     concerns = []
     total_penalty = 0
 
-    # 1. Job Hopping Check
+    # 1. Job Hopping Check (context-aware: contract/temp roles get 50% penalty reduction)
+    contract_keywords = {'contract', 'temporary', 'interim', 'consultant', 'consulting',
+                         'freelance', 'locum', 'locums', 'per diem', 'prn', 'temp'}
     if len(jobs) >= 3:
         tenures = [j.duration_months for j in jobs if j.duration_months > 0]
         if tenures:
             avg_tenure = sum(tenures) / len(tenures)
 
+            # Check if most short-tenure jobs are contract/temp roles
+            contract_count = sum(
+                1 for j in jobs
+                if any(kw in j.title.lower() for kw in contract_keywords)
+            )
+            is_primarily_contract = contract_count >= len(jobs) * 0.4  # 40%+ are contract roles
+            penalty_multiplier = 0.5 if is_primarily_contract else 1.0
+
             if avg_tenure < 12:
-                penalties['job_hopping'] = 15
-                concerns.append(f"High turnover risk: Average tenure {avg_tenure:.0f} months (<12 months)")
+                base_penalty = 15
+                penalties['job_hopping'] = round(base_penalty * penalty_multiplier)
+                contract_note = " (reduced — contract/temp roles detected)" if is_primarily_contract else ""
+                concerns.append(f"High turnover risk: Average tenure {avg_tenure:.0f} months (<12 months){contract_note}")
             elif avg_tenure < 18:
-                penalties['job_hopping'] = 8
-                concerns.append(f"Moderate turnover risk: Average tenure {avg_tenure:.0f} months (<18 months)")
+                base_penalty = 8
+                penalties['job_hopping'] = round(base_penalty * penalty_multiplier)
+                contract_note = " (reduced — contract/temp roles detected)" if is_primarily_contract else ""
+                concerns.append(f"Moderate turnover risk: Average tenure {avg_tenure:.0f} months (<18 months){contract_note}")
 
     # 2. Gap Detection
     sorted_jobs = sorted(
@@ -2372,6 +2482,27 @@ def calculate_hr_score(
         f_pattern_adjustment = -3
         concerns.append(f"Poor visual format: F-Pattern score {f_pattern_score:.0f}/100 - may reduce recruiter engagement")
 
+    # G2. TEXT BLOCK PENALTY (v2.5: penalize bullets >3 lines)
+    text_block_penalty, text_block_details = score_text_block_penalty(candidate.all_bullets)
+    if text_block_penalty < 0:
+        concerns.append(f"Long bullet points detected: {text_block_details['offending_bullets']} bullets exceed 3 lines")
+
+    # G3. DOMAIN-SPECIFIC PAGE LENGTH CHECK (v2.5)
+    # Auto-detect domain from JD text for page length rules
+    page_domain = None
+    jd_lower = jd_text.lower() if jd_text else ""
+    if any(kw in jd_lower for kw in ['clinical trial', 'fda', 'pharmacovigilance', 'patient safety']):
+        page_domain = 'clinical_research'
+    elif any(kw in jd_lower for kw in ['investment', 'trading', 'portfolio', 'banking', 'equity']):
+        page_domain = 'finance'
+    elif any(kw in jd_lower for kw in ['consulting', 'strategy', 'advisory']):
+        page_domain = 'consulting'
+    elif any(kw in jd_lower for kw in ['patient care', 'nursing', 'hospital', 'medical']):
+        page_domain = 'healthcare'
+    page_length_penalty, page_length_details = check_page_length_penalty(resume_text, domain=page_domain)
+    if page_length_penalty < 0:
+        concerns.append(f"Page length: {page_length_details['rule']}")
+
     # 4. EDGE CASE DETECTION & MODE SWITCHING
     mode, tags = detect_edge_cases(candidate, scores.experience, scores.skills)
     candidate.tags.extend(tags)
@@ -2400,7 +2531,7 @@ def calculate_hr_score(
     )
     concerns.extend(penalty_concerns)
 
-    final_score = max(0, min(100, raw_score - penalty_total + f_pattern_adjustment))
+    final_score = max(0, min(100, raw_score - penalty_total + f_pattern_adjustment + text_block_penalty + page_length_penalty))
 
     # 8. DETERMINE RECOMMENDATION (considering job_fit specifically)
     # Job fit is critical - low job_fit should impact recommendation even if other scores are high
@@ -2589,6 +2720,25 @@ def calculate_hr_score_from_text(resume_text: str, jd_text: str) -> "HRScoreResu
     f_pattern_score, _ = score_f_pattern_compliance(resume_text, candidate.all_bullets)
     f_pattern_adjustment = 5 if f_pattern_score >= 80 else (2 if f_pattern_score >= 60 else (-3 if f_pattern_score < 40 else 0))
 
+    # v2.5: Text block penalty + page length check
+    text_block_penalty, text_block_details = score_text_block_penalty(candidate.all_bullets)
+    if text_block_penalty < 0:
+        concerns.append(f"Long bullet points: {text_block_details['offending_bullets']} bullets exceed 3 lines")
+
+    page_domain = None
+    jd_lower = jd_text.lower() if jd_text else ""
+    if any(kw in jd_lower for kw in ['clinical trial', 'fda', 'pharmacovigilance', 'patient safety']):
+        page_domain = 'clinical_research'
+    elif any(kw in jd_lower for kw in ['investment', 'trading', 'portfolio', 'banking', 'equity']):
+        page_domain = 'finance'
+    elif any(kw in jd_lower for kw in ['consulting', 'strategy', 'advisory']):
+        page_domain = 'consulting'
+    elif any(kw in jd_lower for kw in ['patient care', 'nursing', 'hospital', 'medical']):
+        page_domain = 'healthcare'
+    page_length_penalty, _ = check_page_length_penalty(resume_text, domain=page_domain)
+    if page_length_penalty < 0:
+        concerns.append("Resume exceeds recommended page length for this domain")
+
     mode, tags = detect_edge_cases(candidate, scores.experience, scores.skills)
     candidate.tags.extend(tags)
 
@@ -2606,7 +2756,7 @@ def calculate_hr_score_from_text(resume_text: str, jd_text: str) -> "HRScoreResu
     penalty_total, penalty_breakdown, penalty_concerns = calculate_penalties(candidate.jobs, resume_text, jd)
     concerns.extend(penalty_concerns)
 
-    final_score = max(0, min(100, raw_score - penalty_total + f_pattern_adjustment))
+    final_score = max(0, min(100, raw_score - penalty_total + f_pattern_adjustment + text_block_penalty + page_length_penalty))
 
     job_fit_is_low = scores.job_fit < 60
     job_fit_is_marginal = 60 <= scores.job_fit < 75
