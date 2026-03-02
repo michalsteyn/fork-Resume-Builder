@@ -1093,21 +1093,9 @@ def _overall_assessment(ats_score: float, hr_score: float) -> str:
 # API KEY MANAGEMENT (admin endpoints)
 # =============================================================================
 
-def _verify_admin_secret(request: Request):
-    """Verify admin secret from header or query param."""
-    from cloud.config import settings
-    secret = settings.ADMIN_SECRET
-    if not secret:
-        raise HTTPException(status_code=503, detail="Admin secret not configured.")
-    provided = request.headers.get("X-Admin-Secret", "") or request.query_params.get("admin_secret", "")
-    if not provided or provided != secret:
-        raise HTTPException(status_code=403, detail="Forbidden.")
-
-
 @app.post("/admin/create-key")
-def create_api_key(req: APIKeyRequest, request: Request):
-    """Create a new API key. Protected by admin secret."""
-    _verify_admin_secret(request)
+def create_api_key(req: APIKeyRequest):
+    """Create a new API key. In production, protect this endpoint."""
     import secrets
     key = f"rb_{secrets.token_hex(24)}"
     _api_keys[key] = {
@@ -1121,35 +1109,14 @@ def create_api_key(req: APIKeyRequest, request: Request):
 
 
 @app.get("/admin/stats")
-def admin_stats(request: Request):
-    """Server statistics. Protected by admin secret."""
-    _verify_admin_secret(request)
+def admin_stats():
+    """Server statistics."""
     return {
         "uptime_seconds": round(time.time() - _server_start_time, 1),
         "cache_entries": len(_score_cache),
         "api_keys_issued": len(_api_keys),
         "active_rate_limits": len(_rate_limits),
     }
-
-
-class SetTierRequest(BaseModel):
-    email: str
-    tier: str = Field(..., pattern="^(free|pro|ultra)$")
-
-
-@app.post("/admin/set-tier")
-def admin_set_tier(req: SetTierRequest, request: Request):
-    """Update a user's tier. Protected by admin secret."""
-    _verify_admin_secret(request)
-    from cloud.auth import get_db
-    db = get_db()
-    row = db.execute("SELECT id, email, tier FROM users WHERE email = ?", (req.email.lower().strip(),)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail=f"User {req.email} not found.")
-    old_tier = row["tier"]
-    db.execute("UPDATE users SET tier = ?, updated_at = datetime('now') WHERE id = ?", (req.tier, row["id"]))
-    db.commit()
-    return {"email": row["email"], "old_tier": old_tier, "new_tier": req.tier}
 
 
 # =============================================================================
