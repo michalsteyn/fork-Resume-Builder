@@ -540,41 +540,9 @@ class HRScoreResult:
 # =============================================================================
 
 def extract_text_from_file(file_path: str) -> str:
-    """Extract text from PDF, DOCX, or MD file"""
-    ext = os.path.splitext(file_path)[1].lower()
-
-    if ext == '.pdf':
-        try:
-            import fitz  # PyMuPDF
-            doc = fitz.open(file_path)
-            text = ""
-            for page in doc:
-                text += page.get_text()
-            doc.close()
-            return text
-        except ImportError:
-            # Fallback to pdfplumber
-            try:
-                import pdfplumber
-                with pdfplumber.open(file_path) as pdf:
-                    return "\n".join(page.extract_text() or "" for page in pdf.pages)
-            except ImportError:
-                raise ImportError("Install PyMuPDF (fitz) or pdfplumber for PDF support")
-
-    elif ext == '.docx':
-        try:
-            from docx import Document
-            doc = Document(file_path)
-            return "\n".join(para.text for para in doc.paragraphs)
-        except ImportError:
-            raise ImportError("Install python-docx for DOCX support")
-
-    elif ext in ['.md', '.txt']:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return f.read()
-
-    else:
-        raise ValueError(f"Unsupported file format: {ext}")
+    """Extract text from PDF, DOCX, MD, or TXT file."""
+    from text_extractor import extract_text
+    return extract_text(file_path)
 
 
 def parse_date(date_str: str) -> Optional[date]:
@@ -697,9 +665,32 @@ def parse_resume(text: str) -> CandidateProfile:
 
     # Section detection patterns
     section_patterns = {
-        'experience': r'^(?:professional\s+)?experience$|^work\s+history$|^employment',
-        'education': r'^education$|^academic|^qualifications',
-        'skills': r'^skills$|^competencies$|^technical\s+skills$|^core\s+competencies$',
+        'experience': (
+            r'^(?:professional\s+)?experience$'
+            r'|^work\s+history$'
+            r'|^employment'
+            r'|^(?:research\s+)?work\s+experience'
+            r'|^research\s+(?:and\s+)?(?:work\s+)?experience'
+            r'|^clinical\s+experience'
+            r'|^teaching\s+experience'
+            r'|^academic\s+(?:and\s+)?(?:professional\s+)?experience'
+            r'|^industry\s+experience'
+            r'|^(?:relevant\s+)?(?:work\s+)?experience'
+            r'|^career\s+(?:history|summary|profile)'
+            r'|^positions?\s+(?:held|history)'
+            r'|^professional\s+(?:history|background|profile)'
+            r'|^job\s+(?:history|experience)'
+        ),
+        'education': r'^education$|^academic|^qualifications|^academic\s+background',
+        'skills': (
+            r'^skills$|^competencies$|^core\s+competencies$'
+            r'|^technical\s+skills?$'
+            r'|^key\s+skills?'
+            r'|^areas?\s+of\s+expertise'
+            r'|^expertise$'
+            r'|^proficiencies'
+            r'|^(?:technical\s+)?capabilities'
+        ),
         'certifications': r'^certifications?|^licenses?|^credentials',
         'summary': r'^(?:professional\s+)?summary$|^profile$|^objective$|^about',
         'publications': r'^publications?$',
@@ -774,11 +765,56 @@ def parse_resume(text: str) -> CandidateProfile:
                         current_job.hierarchy_level = get_title_hierarchy_level(current_job.title)
                         profile.jobs.append(current_job)
 
+                    # Handle Title|Date|Company format (academic/research resumes)
+                    # e.g. "PhD student | 2022-present | Mount Sinai"
+                    actual_company = potential_company
+                    actual_location = job_match.group(3).strip() if job_match.group(3) else ""
+                    inline_start = None
+                    inline_end = None
+                    inline_is_current = False
+                    for dp in date_patterns:
+                        dm = re.search(dp, potential_company, re.IGNORECASE)
+                        if dm:
+                            # company field is actually a date — shift fields
+                            actual_company = actual_location
+                            actual_location = ""
+                            inline_start = parse_date(dm.group(1))
+                            end_str = dm.group(2)
+                            if 'present' in end_str.lower() or 'current' in end_str.lower():
+                                inline_end = None
+                                inline_is_current = True
+                            else:
+                                inline_end = parse_date(end_str)
+                            break
+
+                    # Also handle Title|Company|Date format (date in 3rd field)
+                    if not inline_start and actual_location:
+                        for dp in date_patterns:
+                            dm = re.search(dp, actual_location, re.IGNORECASE)
+                            if dm:
+                                inline_start = parse_date(dm.group(1))
+                                end_str = dm.group(2)
+                                if 'present' in end_str.lower() or 'current' in end_str.lower():
+                                    inline_end = None
+                                    inline_is_current = True
+                                else:
+                                    inline_end = parse_date(end_str)
+                                actual_location = ""
+                                break
+
                     current_job = JobEntry(
                         title=potential_title,
-                        company=potential_company,
-                        location=job_match.group(3).strip() if job_match.group(3) else ""
+                        company=actual_company,
+                        location=actual_location,
                     )
+                    if inline_start:
+                        current_job.start_date = inline_start
+                        current_job.end_date = inline_end
+                        current_job.is_current = inline_is_current
+                        end = inline_end or date.today()
+                        if inline_start:
+                            delta = (end.year - inline_start.year) * 12 + (end.month - inline_start.month)
+                            current_job.duration_months = max(0, delta)
                     continue
 
             # Check for date line (separate line with just dates)
@@ -801,11 +837,46 @@ def parse_resume(text: str) -> CandidateProfile:
                             current_job.duration_months = max(0, delta)
                     break
 
-            # Check for bullet points
-            if line_stripped.startswith(('•', '-', '*')) and current_job:
-                bullet = re.sub(r'^[•\-*]\s*', '', line_stripped)
-                current_job.bullets.append(bullet)
-                profile.all_bullets.append(bullet)
+            # Check for bullet points (•, -, *, —, numbered lists, or no marker)
+            bullet_match = re.match(r'^[•\-*—]\s+(.+)$|^\d+[.)]\s+(.+)$', line_stripped)
+            if bullet_match and current_job:
+                bullet = (bullet_match.group(1) or bullet_match.group(2) or "").strip()
+                if bullet:
+                    current_job.bullets.append(bullet)
+                    profile.all_bullets.append(bullet)
+            elif (current_job and current_job.start_date is not None
+                  and not line_stripped.startswith(('•', '-', '*', '—'))
+                  and '|' not in line_stripped
+                  and len(line_stripped) > 20
+                  and not any(re.search(dp, line_stripped, re.IGNORECASE) for dp in date_patterns)):
+                # Plain sentence in experience section without bullet marker — treat as bullet
+                current_job.bullets.append(line_stripped)
+                profile.all_bullets.append(line_stripped)
+            elif (in_experience_section and not job_match
+                  and not line_stripped.startswith(('•', '-', '*', '—'))
+                  and '|' not in line_stripped
+                  and not any(re.search(dp, line_stripped, re.IGNORECASE) for dp in date_patterns)
+                  and len(line_stripped) > 3 and len(line_stripped) < 80
+                  and current_job is None):
+                # Looks like a standalone title line (no-pipe format) — peek ahead for company+dates
+                next_lines = [lines[k].strip() for k in range(i + 1, min(i + 5, len(lines))) if lines[k].strip()]
+                has_date_nearby = any(
+                    any(re.search(dp, nl, re.IGNORECASE) for dp in date_patterns)
+                    for nl in next_lines[:3]
+                )
+                if has_date_nearby:
+                    # Treat this line as a job title; next non-date line before the date is the company
+                    pending_title = line_stripped
+                    pending_company = ""
+                    for nl in next_lines:
+                        if any(re.search(dp, nl, re.IGNORECASE) for dp in date_patterns):
+                            break
+                        if nl and not nl.startswith(('•', '-', '*', '—')):
+                            pending_company = nl
+                    if current_job:
+                        current_job.hierarchy_level = get_title_hierarchy_level(current_job.title)
+                        profile.jobs.append(current_job)
+                    current_job = JobEntry(title=pending_title, company=pending_company, location="")
 
         elif current_section == 'skills':
             # Extract skills (comma or bullet separated)

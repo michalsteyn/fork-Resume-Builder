@@ -286,6 +286,68 @@ def lightweight_score(resume_text: str, jd_text: str) -> float:
 
 
 # ---------------------------------------------------------------------------
+# AI Resume Analysis (LLM-enhanced search query generation)
+# ---------------------------------------------------------------------------
+
+def analyze_resume_for_search(resume_text: str) -> Dict[str, Any]:
+    """
+    Use Claude to analyze the resume and extract job search intelligence:
+    - Most recent job title + career level
+    - Domain / industry
+    - 3-5 suggested search queries covering related roles
+
+    Returns a dict with keys: recent_title, career_level, domain, search_queries.
+    Falls back to empty dict if ANTHROPIC_API_KEY not set or call fails.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return {}
+
+    model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+
+    # Trim resume to avoid token waste — first 3000 chars captures header + experience
+    resume_excerpt = resume_text[:3000]
+
+    prompt = (
+        "Analyze this resume excerpt and return a JSON object with these exact keys:\n"
+        "- recent_title: the person's most recent job title (string)\n"
+        "- career_level: one of entry, mid, senior, director, vp, executive (string)\n"
+        "- domain: primary industry/domain (string, e.g. 'clinical research', 'software engineering')\n"
+        "- search_queries: list of 4-5 job search query strings that best match this person's "
+        "background and logical next career step. Include the obvious title AND 2-3 related/adjacent "
+        "roles they could realistically land. Keep each query short (2-4 words).\n\n"
+        "Return ONLY valid JSON, no markdown, no explanation.\n\n"
+        f"Resume:\n{resume_excerpt}"
+    )
+
+    payload = json.dumps({
+        "model": model,
+        "max_tokens": 300,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        raw = data["content"][0]["text"].strip()
+        # Strip markdown code fences if present
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
 # Main Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -316,16 +378,43 @@ def discover_jobs(
     max_results = min(max(max_results, 1), 20)
     all_jobs: List[Dict[str, Any]] = []
 
-    # --- Step 1: Search APIs ---
+    # --- Step 0: AI resume analysis for smarter search queries ---
+    ai_analysis: Dict[str, Any] = {}
+    if not job_title.strip():
+        # No title given — use AI to figure out what to search for
+        ai_analysis = analyze_resume_for_search(resume_text)
+        job_title = ai_analysis.get("recent_title", "") or "professional"
+
+    # Build search query list: user-provided title + AI-suggested related queries
+    search_queries = [job_title]
+    if ai_analysis:
+        suggested = ai_analysis.get("search_queries", [])
+        # Add AI suggestions that differ from the primary title (dedup)
+        for q in suggested:
+            if q.lower().strip() != job_title.lower().strip() and q not in search_queries:
+                search_queries.append(q)
+        search_queries = search_queries[:4]  # Cap at 4 queries to limit API calls
+
+    # --- Step 1: Search APIs (multi-query if AI analysis available) ---
     has_adzuna = _adzuna_configured()
+    seen_ids: set = set()
 
-    if has_adzuna:
-        adzuna_jobs = search_adzuna(job_title, location=location)
-        all_jobs.extend(adzuna_jobs)
+    for query in search_queries:
+        if has_adzuna:
+            for job in search_adzuna(query, location=location):
+                if job["id"] not in seen_ids:
+                    seen_ids.add(job["id"])
+                    all_jobs.append(job)
 
-    if remote_only or not all_jobs:
-        remotive_jobs = search_remotive(job_title)
-        all_jobs.extend(remotive_jobs)
+        if remote_only or not all_jobs:
+            for job in search_remotive(query):
+                if job["id"] not in seen_ids:
+                    seen_ids.add(job["id"])
+                    all_jobs.append(job)
+
+        # Stop after first query if we have enough candidates
+        if len(all_jobs) >= 40:
+            break
 
     if not all_jobs:
         if not has_adzuna:
@@ -424,9 +513,9 @@ def discover_jobs(
                 "experience_fit": hr_dict.get("factor_breakdown", {}).get("experience", 0),
                 "skills_match": hr_dict.get("factor_breakdown", {}).get("skills", 0),
             }
-        except Exception:
-            hr_score = 0
-            hr_detail = {"error": "HR scoring failed"}
+        except Exception as e:
+            hr_score = round(job.get("_light_score", 0) * 0.8, 1)  # fallback: 80% of light score
+            hr_detail = {"error": f"HR scoring failed: {type(e).__name__}: {e}"}
 
         result_entry["scoring_tier"] = "full"
         result_entry["ats_score"] = ats_score
@@ -454,7 +543,7 @@ def discover_jobs(
         attr_parts.append("Remotive")
     attribution = f"Powered by {' & '.join(attr_parts)}" if attr_parts else "No source"
 
-    return {
+    result: Dict[str, Any] = {
         "jobs": ranked_jobs,
         "query": {
             "job_title": job_title,
@@ -463,3 +552,11 @@ def discover_jobs(
         },
         "attribution": attribution,
     }
+    if ai_analysis:
+        result["ai_analysis"] = {
+            "recent_title": ai_analysis.get("recent_title", ""),
+            "career_level": ai_analysis.get("career_level", ""),
+            "domain": ai_analysis.get("domain", ""),
+            "search_queries_used": search_queries,
+        }
+    return result

@@ -2034,21 +2034,9 @@ def extract_text_from_pdf(pdf_path):
 
 
 def extract_text_from_file(file_path):
-    """Extract text from various file types."""
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext == '.pdf':
-        return extract_text_from_pdf(file_path)
-    elif ext == '.docx':
-        try:
-            from docx import Document
-            doc = Document(file_path)
-            return "\n".join(para.text for para in doc.paragraphs)
-        except ImportError:
-            raise ImportError("Install python-docx for DOCX support: pip install python-docx")
-    elif ext in ['.md', '.txt']:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return f.read()
-    return ""
+    """Extract text from PDF, DOCX, MD, or TXT file."""
+    from text_extractor import extract_text
+    return extract_text(file_path)
 
 
 def clean_text(text):
