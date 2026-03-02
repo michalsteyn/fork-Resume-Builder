@@ -71,6 +71,7 @@ try:
         create_api_key as create_user_api_key, validate_api_key as validate_user_api_key,
         log_usage, check_usage_allowed, get_usage_stats,
         create_jwt_token, decode_jwt_token, update_user_tier,
+        get_or_create_anonymous_user,
     )
     from cloud.billing import (
         is_billing_configured, create_checkout_session,
@@ -336,11 +337,8 @@ async def verify_api_key(request: Request):
     # Try API key (cloud SQLite-backed)
     api_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
 
-    if not api_key:
-        raise HTTPException(status_code=401, detail="Authentication required. Pass JWT via Authorization: Bearer <token> or API key via X-API-Key header.")
-
     # Try cloud-backed API key validation
-    if CLOUD_AVAILABLE:
+    if api_key and CLOUD_AVAILABLE:
         key_info = validate_user_api_key(api_key)
         if key_info:
             user_id = key_info["user_id"]
@@ -352,7 +350,7 @@ async def verify_api_key(request: Request):
             return {"user_id": user_id, "tier": tier, "email": key_info.get("email", "")}
 
     # Fall back to legacy in-memory keys
-    if api_key in _api_keys:
+    if api_key and api_key in _api_keys:
         if not _check_rate_limit(api_key):
             raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again in 60 seconds.")
 
@@ -365,7 +363,22 @@ async def verify_api_key(request: Request):
         key_info["daily_count"] = key_info.get("daily_count", 0) + 1
         return api_key
 
-    raise HTTPException(status_code=403, detail="Invalid API key.")
+    # Anonymous access — track by IP fingerprint for free tier enforcement
+    if CLOUD_AVAILABLE:
+        client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown")
+        if "," in client_ip:
+            client_ip = client_ip.split(",")[0].strip()
+        fingerprint = hashlib.sha256(client_ip.encode()).hexdigest()[:16]
+        anon_user = get_or_create_anonymous_user(fingerprint)
+
+        if not _check_rate_limit(f"anon:{fingerprint}"):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again in 60 seconds.")
+
+        return {"user_id": anon_user["id"], "tier": anon_user["tier"], "email": anon_user["email"], "anonymous": True}
+
+    if api_key:
+        raise HTTPException(status_code=403, detail="Invalid API key.")
+    raise HTTPException(status_code=401, detail="Authentication required. Pass JWT via Authorization: Bearer <token> or API key via X-API-Key header.")
 
 
 async def verify_api_key_with_usage(request: Request):
@@ -379,10 +392,19 @@ async def verify_api_key_with_usage(request: Request):
         user_id = auth["user_id"]
         tier = auth.get("tier", "free")
         if tier == "free" and not check_usage_allowed(user_id, tier):
-            raise HTTPException(
-                status_code=402,
-                detail=f"Free tier limit reached ({_config['free_tier_total_limit']} scores). Upgrade to Pro for unlimited scoring.",
-            )
+            is_anon = auth.get("anonymous", False)
+            if is_anon:
+                detail = (
+                    f"Free tier limit reached ({_config['free_tier_total_limit']} scores). "
+                    f"Register at https://resume-scorer.fly.dev/auth/register for more scores, "
+                    f"or upgrade to Pro ($12/month) for unlimited scoring."
+                )
+            else:
+                detail = (
+                    f"Free tier limit reached ({_config['free_tier_total_limit']} scores). "
+                    f"Upgrade to Pro for unlimited scoring."
+                )
+            raise HTTPException(status_code=402, detail=detail)
 
     # Check legacy in-memory key limits
     if isinstance(auth, str) and auth in _api_keys:
