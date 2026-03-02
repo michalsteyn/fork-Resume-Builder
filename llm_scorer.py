@@ -208,6 +208,7 @@ def rewrite_resume(
     model: str = "claude-sonnet-4-6",
     temperature: float = 0.3,
     domain_hint: Optional[str] = None,
+    format_style: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Rewrite/tailor a resume to match a job description using Claude.
@@ -235,9 +236,59 @@ def rewrite_resume(
     if domain_hint:
         domain_context = f"\nDomain: This is a {domain_hint.replace('_', ' ')} role."
 
+    _FORMAT_INSTRUCTIONS = {
+        "harvard": """
+FORMAT STYLE — Harvard Classic:
+- Center the name (first line) and contact info (second line)
+- Section headers: bold, left-aligned, with a line underneath (e.g. "EDUCATION")
+- List Education BEFORE Professional Experience
+- Job entries: use "Company, Location" on one line (bold), then "Title | Date range" on the next
+- Write in formal, scholarly tone — full sentences in summary, detailed bullet points
+- Use longer, more detailed bullets that show depth of knowledge
+- Dates right-aligned where possible (format: "Month Year – Month Year")
+- No decorative symbols; use plain hyphens (-) for bullets if needed
+""",
+        "modern": """
+FORMAT STYLE — Modern Clean:
+- Left-align name (first line), contact on second line — keep concise
+- Section headers: ALL CAPS with a short line before and after (e.g. "─── EXPERIENCE ───")
+- Job entries: "TITLE | Company | Location" (pipe-separated, title first in CAPS)
+- Use crisp, action-packed bullets — 1 line each where possible
+- Contemporary, energetic tone — avoid stuffy corporate language
+- Highlight measurable results in every bullet (%, $, numbers)
+- Keep summary to 2 punchy sentences maximum
+""",
+        "executive": """
+FORMAT STYLE — Executive Classic:
+- Center the name (first line) and contact info (second line)
+- Section headers: centered, ALL CAPS, bold
+- Job entries: "JOB TITLE | COMPANY NAME | Location" (bold, left-aligned), dates on next line
+- Write in a senior leadership tone — strategic, high-level, board-room language
+- Bullets should emphasize P&L impact, organizational scale, strategic vision
+- Lead every bullet with a powerful action verb (Spearheaded, Orchestrated, Transformed)
+- Summary should be 3-4 sentences positioning candidate as a senior leader
+- Avoid technical jargon; focus on business outcomes and stakeholder value
+""",
+        "ats": """
+FORMAT STYLE — ATS Optimized:
+- Name on first line, contact info on second line
+- Section headers: ALL CAPS (e.g. "PROFESSIONAL EXPERIENCE")
+- Job entries: "JOB TITLE | COMPANY NAME | Location" (pipe-separated)
+- Bullet points using • character
+- Horizontal separators using underscores (___) between sections
+- Keyword-dense but natural — prioritize ATS keyword matching
+""",
+    }
+
+    format_ctx = _FORMAT_INSTRUCTIONS.get(format_style or "ats", _FORMAT_INSTRUCTIONS["ats"])
+
     rewrite_prompt = f"""You are an expert resume writer who tailors resumes for specific job descriptions.
 
 TASK: Rewrite the resume below to better match the job description. Return the FULL rewritten resume text.
+
+FORMATTING RULES — CRITICAL:
+- NEVER use markdown formatting. No **bold**, no *italic*, no # headers, no backticks.
+- Use plain text only. Section headers in ALL CAPS. Bullets using the • character.
 
 STRICT AUTHENTICITY RULES — YOU MUST FOLLOW THESE:
 1. NEVER change job titles — keep them EXACTLY as they are
@@ -258,7 +309,7 @@ WHAT YOU CAN MODIFY:
 5. Add quantified metrics where the original bullet implies them
 
 {domain_context}
-
+{format_ctx}
 OUTPUT FORMAT — Return ONLY valid JSON:
 {{
   "rewritten_resume": "<the full rewritten resume text>",
@@ -294,6 +345,10 @@ ORIGINAL RESUME:
 
         result = json.loads(response_text)
         result["model_used"] = model
+        # Strip any markdown asterisks the LLM may have added despite instructions
+        if isinstance(result.get("rewritten_resume"), str):
+            import re as _re
+            result["rewritten_resume"] = _re.sub(r"\*+", "", result["rewritten_resume"])
         return result
 
     except json.JSONDecodeError as e:
