@@ -1,13 +1,13 @@
 # Resume Builder — One-Time Setup
 
-Run this command once after installing the plugin to enable the advanced ATS/HR scoring engine.
+Run this command once after installing the plugin to get started.
 
 ## Input
 $ARGUMENTS
 
 ## Instructions
 
-You are helping the user set up the Resume Builder plugin's scoring engine. This is a one-time setup that installs Python dependencies needed for the MCP-based ATS and HR scorers.
+You are helping the user set up the Resume Builder plugin. Guide them through the steps below.
 
 ### Step 1: Check Python
 
@@ -30,21 +30,46 @@ After installing Python, run /resume-builder:setup again.
 
 Stop here if Python is not installed.
 
-### Step 2: Install Dependencies
+### Step 2: Choose Install Type
 
-Run this command to install all required packages:
+Ask the user which setup they prefer:
+
+**Option A: Quick Setup (Recommended for most users)**
+- Cloud-based scoring — no heavy downloads
+- Installs only 2 small packages (~5 seconds)
+- Scoring happens on our cloud server (5 free scores, then Pro $12/month for unlimited)
+- AI rewriting available with your own Anthropic API key
+
+**Option B: Full Local Setup (For developers / offline use)**
+- Installs all scoring engines locally (~500MB, takes 2-3 minutes)
+- Scoring runs on your machine — no cloud needed, no limits
+- Requires more disk space and RAM
+
+### Step 3A: Quick Setup (Cloud)
+
+```bash
+pip install -r requirements-plugin.txt
+```
+
+If `pip` is not found, try `pip3` or `python -m pip`. Use `${CLAUDE_PLUGIN_ROOT}/requirements-plugin.txt` if needed.
+
+This installs `fastmcp` (MCP protocol) and `anthropic` (for LLM features). All ATS/HR scoring goes through the cloud API automatically.
+
+### Step 3B: Full Local Setup
 
 ```bash
 pip install -r requirements.txt
 ```
 
-If `pip` is not found, try `pip3 install -r requirements.txt` or `python -m pip install -r requirements.txt`.
+Use `${CLAUDE_PLUGIN_ROOT}/requirements.txt` if needed. This takes 1-3 minutes (downloads sentence-transformers model ~80MB).
 
-The requirements file is located in the plugin directory. Use `${CLAUDE_PLUGIN_ROOT}/requirements.txt` if needed.
+Then download NLTK data:
 
-Wait for it to complete. This may take 1-3 minutes (sentence-transformers downloads a ~80MB model).
+```bash
+python -c "import nltk; nltk.download('wordnet'); nltk.download('punkt_tab')"
+```
 
-### Step 3: Set Up Configuration
+### Step 4: Set Up Configuration
 
 Check if the user has a `config.json` in their project. If not, create one from `config.example.json`:
 
@@ -55,26 +80,30 @@ Check if the user has a `config.json` in their project. If not, create one from 
    - Email
    - Phone
    - LinkedIn URL
-   - Path to their master resume file (a markdown file with their full work history)
+   - Path to their master resume file (DOCX, PDF, or Markdown with their full work history)
 3. Create `config.json` with their answers
 
-### Step 4: (Optional) LLM Scorer Setup
+### Step 5: (Optional) LLM Features Setup
 
-Ask the user if they want to enable the LLM-augmented scorer (uses Claude API for deeper analysis).
+Ask the user if they want to enable AI-powered scoring and resume rewriting.
 
 If yes:
 1. They need an Anthropic API key from https://console.anthropic.com/
 2. Create a `.env` file with: `ANTHROPIC_API_KEY=sk-ant-...`
-3. This enables the `score_llm` and `score_combined` tools
+3. This enables the `score_with_llm` and `rewrite_resume` tools
 
-If no, skip this step. The rules-based ATS and HR scorers work without an API key.
+If no, skip this step. The ATS and HR scorers work without an API key.
 
-### Step 5: Verify
+### Step 6: Verify
 
-Run a quick test to verify everything works:
-
+For Quick Setup, run:
 ```bash
-python -c "import ats_scorer; import hr_scorer; print('Scoring engine ready!')"
+python -c "import fastmcp; print('Plugin ready! Cloud scoring active.')"
+```
+
+For Full Setup, run:
+```bash
+python -c "import ats_scorer; import hr_scorer; print('Full scoring engine ready!')"
 ```
 
 If successful, tell the user:
@@ -87,7 +116,8 @@ Setup complete! You can now use:
   /resume-builder:cover-letter [paste JD]           — Cover letter only
   /resume-builder:writing-coach [resume file]       — Improve resume writing quality
 
-The ATS/HR scoring engine is now active and will automatically score your resumes.
+The scoring engine is active and will automatically score your resumes.
+Cloud scoring: 5 free scores included. Upgrade at https://resume-scorer-web.streamlit.app
 ```
 
 If it fails, show the error and suggest fixes.
