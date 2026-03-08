@@ -29,6 +29,32 @@ Then retry `/health` up to 45 seconds (models take ~30s to load). Once healthy, 
 
 ---
 
+## PHASE 0.5: JOB FIT PRE-CHECK (mandatory gate)
+
+Before investing time in tailoring, run the Job Fit Scorer to check for knockout disqualifiers:
+
+```bash
+curl -s -X POST http://localhost:8100/score/job-fit \
+  -H "Content-Type: application/json" \
+  -d '{"resume_text": "<master_resume_text>", "jd_text": "<jd_text>"}'
+```
+
+If server is not running, use Python directly:
+```python
+from job_fit_scorer import calculate_job_fit, format_report
+result = calculate_job_fit(resume_text, jd_text)
+```
+
+**Decision gate:**
+- **STRONG FIT (75+)**: Proceed to Phase 1.
+- **MODERATE FIT (55-74)**: Proceed — show the user fixable gaps and note them for writing.
+- **WEAK FIT (35-54)**: PAUSE. Show the user the report and ask: "This job is a weak fit (score: X). [Show knockouts/gaps]. Continue anyway?"
+- **NO-GO (<35 or hard knockouts)**: STOP. Show the full report with knockouts and alternative job titles. Do NOT proceed. Tell the user: "This job has disqualifying requirements: [list knockouts]. Better-fit roles: [alternatives]."
+
+Display the fit score, any knockouts, and key dimensions before proceeding.
+
+---
+
 ## PHASE 1: PARALLEL RESEARCH (launch all simultaneously)
 
 Execute these **3 actions in a single parallel tool call** (no agents — use Read, Glob, Write tools simultaneously):
@@ -205,13 +231,14 @@ python hr_scorer.py --score "applications/{folder}/{Name}_Resume_{Company}.docx"
 3. **Bullet points** - Reframe achievements using JD language where natural
 
 **What You CANNOT Modify:**
-1. **Job Titles** - EXACTLY as in master resume
-2. **Company Names** - Never change
-3. **Dates** - Never change
-4. **Education** - Exactly as-is
-5. **Publications** - NEVER add keywords
-6. **Certifications** - Exactly as-is
-7. **Professional Memberships** - Exactly as-is
+1. **Job Titles** - EXACTLY as in master resume (copy verbatim, no additions or removals)
+2. **Job Experience Entries** - ALL roles from the master resume must appear. Reduce bullet count for older/less-relevant roles (minimum 1 bullet each), but NEVER drop a role entirely.
+3. **Company Names** - Never change
+4. **Dates** - Never change
+5. **Education** - Exactly as-is
+6. **Publications** - NEVER add keywords
+7. **Certifications** - Exactly as-is
+8. **Professional Memberships** - Exactly as-is
 
 **Keyword Rules:**
 - Each keyword: **1-2 times MAX** across entire resume
@@ -226,10 +253,18 @@ python hr_scorer.py --score "applications/{folder}/{Name}_Resume_{Company}.docx"
 **Rule 4 (Metrics):** 50%+ bullets contain quantified metrics (plain text, no ** bold)
 **Rule 5 (Verbs L3+):** 70%+ verbs at Directive/Strategic/Transformative level
 **Rule 6 (Architecture):** Impact Lead, Challenge-Action-Result, or Scope-Authority
-**Rule 7 (Rhythm):** Vary bullet lengths
+**Rule 7 (Burstiness):** Vary bullet lengths: SHORT (6-10 words), MEDIUM (11-18 words), LONG (19-28 words). Never 3+ bullets in a row at same approximate length. Target per job block: 1-2 short, 3-4 medium, 1-2 long.
 **Rule 8 (Parallel):** Consistent grammar patterns per role
 **Rule 9 (Summary Hook):** Identity + authority → differentiator
 **Rule 10 (Authenticity):** Interview Test on every bullet
+
+**Rule 11 (Anti-Cliché):** FORBIDDEN verbs: Spearheaded, Leveraged, Utilized, Facilitated, Ensured, Demonstrated, Collaborated, Streamlined, Championed, Fostered, Harnessed, Liaised. USE: Led, Directed, Built, Drove, Cut, Grew, Won, Launched, Transformed, Redesigned, Managed.
+
+**Rule 12 (Grammatical Variety):** Min 2 bullets per job block must NOT start with an action verb. Options: noun-led ("Key architect of…"), participial ("Working across 5 teams, unified…"), result-led ("Zero protocol deviations — achieved via…").
+
+**Rule 13 (Texture):** One real-world specific detail per job block: named tool, regulation, or real constraint. e.g. "using Medidata Rave", "per ICH E6(R2)", "despite COVID-19 closures".
+
+**Rule 14 (Summary Anti-Cliché):** NEVER write: "proven track record", "passionate about", "dynamic professional", "results-driven". First sentence: specific number + years. Max 4 sentences. Sound like a senior practitioner, not a LinkedIn template.
 
 ### RESUME STRUCTURE (ATS/Workday)
 
@@ -285,6 +320,7 @@ PROFESSIONAL MEMBERSHIPS
 
 ## ETHICAL REQUIREMENTS (NON-NEGOTIABLE)
 
-- **NEVER CHANGE JOB TITLES** — Match master resume exactly
+- **NEVER CHANGE JOB TITLES** — Match master resume exactly (copy verbatim, including all qualifiers already in the title)
+- **NEVER OMIT JOB EXPERIENCES** — All roles from the master resume must be included. Older or less-relevant roles get fewer bullets (min 1), but zero roles may be dropped.
 - **NEVER CHANGE PUBLICATIONS** — Titles/citations stay as-is
 - **Never invent experience** — Only reframe existing content

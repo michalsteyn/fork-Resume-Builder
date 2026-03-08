@@ -147,16 +147,22 @@ def _normalize_adzuna_result(raw: dict) -> Dict[str, Any]:
         except (ValueError, TypeError):
             posted = posted[:10] if len(posted) >= 10 else posted
 
+    job_id = str(raw.get("id", ""))
+    redirect_url = raw.get("redirect_url", "")
+    # Adzuna /details/{id} is the scrapeable listing page; redirect_url goes to employer ATS
+    listing_url = f"https://www.adzuna.com/details/{job_id}" if job_id else redirect_url
+
     return {
         "source": "adzuna",
-        "id": str(raw.get("id", "")),
+        "id": job_id,
         "title": raw.get("title", "").strip(),
         "company": (raw.get("company", {}) or {}).get("display_name", "Unknown"),
         "location": ", ".join(location_parts) if location_parts else "Not specified",
         "description": strip_html(raw.get("description", "")),
         "salary_min": salary_min,
         "salary_max": salary_max,
-        "url": raw.get("redirect_url", ""),
+        "url": redirect_url,
+        "listing_url": listing_url,
         "category": (raw.get("category", {}) or {}).get("label", ""),
         "posted_date": posted,
     }

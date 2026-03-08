@@ -411,7 +411,7 @@ The scoring API runs locally (`python scorer_server.py --port 8100`) or is hoste
 | `/health` | GET | No | Server health and version info |
 | `/score/ats` | POST | Yes | ATS scoring (8 weighted components) |
 | `/score/hr` | POST | Yes | HR recruiter simulation |
-| `/score/both` | POST | Yes | ATS + HR combined in one call |
+| `/score/both` | POST | Yes | ATS + HR combined in one call (JSON by default, SSE with `Accept: text/event-stream`) |
 | `/score/llm` | POST | Yes | LLM scoring via Claude |
 | `/score/combined` | POST | Yes | All 3 blended (70% rules / 30% LLM) |
 | `/score/batch` | POST | Yes | Score multiple resume/JD pairs |

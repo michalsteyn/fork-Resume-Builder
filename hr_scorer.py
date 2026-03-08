@@ -120,6 +120,36 @@ def get_verb_power_score(verb: str) -> float:
     verb_lower = verb.lower().strip()
     return VERB_POWER_MAP.get(verb_lower, 1.5)  # Default mid-level score
 
+
+def normalize_match_text(text: str) -> str:
+    """Normalize text for boundary-aware term matching."""
+    text = text.lower().replace('_', ' ')
+    text = re.sub(r'[^a-z0-9\s/&+-]', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+
+def compile_term_pattern(term: str) -> Optional[re.Pattern]:
+    """Compile a boundary-aware matcher for a term."""
+    normalized_term = normalize_match_text(term)
+    if not normalized_term:
+        return None
+    return re.compile(r'(?<![a-z0-9])' + re.escape(normalized_term) + r'(?![a-z0-9])')
+
+
+def contains_term(text: str, term: str) -> bool:
+    """Return True only when the term appears as a standalone token or phrase."""
+    pattern = compile_term_pattern(term)
+    return bool(pattern and pattern.search(text))
+
+
+def find_term_positions(text: str, term: str) -> List[int]:
+    """Return all boundary-aware match offsets for a term."""
+    pattern = compile_term_pattern(term)
+    if not pattern:
+        return []
+    return [match.start() for match in pattern.finditer(text)]
+
 # Optional imports for advanced NLP (graceful degradation if not available)
 try:
     from sentence_transformers import SentenceTransformer, util
@@ -533,6 +563,7 @@ class HRScoreResult:
     suggested_questions: List[str]
     candidate_tags: List[str]
     weights_used: Dict[str, float]
+    writing_quality: Dict[str, Any] = field(default_factory=dict)
 
 
 # =============================================================================
@@ -720,6 +751,18 @@ def parse_resume(text: str) -> CandidateProfile:
                 is_section_header = True
                 break
 
+        # Handle decorated headers: ─── SECTION NAME ─── or === SECTION === etc.
+        # (Modern format uses box-drawing ─ chars; strip all non-alpha prefix/suffix)
+        if not is_section_header:
+            _clean_header = re.sub(r'^[^a-zA-Z]+|[^a-zA-Z\s]+$', '', line_stripped).strip()
+            if _clean_header and _clean_header != line_stripped and len(_clean_header) < 50:
+                for section, pattern in section_patterns.items():
+                    if re.match(pattern, _clean_header, re.IGNORECASE):
+                        current_section = section
+                        in_experience_section = (section == 'experience')
+                        is_section_header = True
+                        break
+
         # Also detect ALL-CAPS section headers directly (without preceding ___)
         if not is_section_header and line_stripped.isupper() and len(line_stripped) < 40 and not line_stripped.startswith(('•', '-', '*')):
             for section, pattern in section_patterns.items():
@@ -733,8 +776,8 @@ def parse_resume(text: str) -> CandidateProfile:
         if is_section_header:
             continue
 
-        # Also detect section by horizontal line followed by section name
-        if '___' in line_stripped:
+        # Also detect section by horizontal line (underscores or box-drawing) followed by section name
+        if '___' in line_stripped or re.match(r'^[─═\-─]{3,}$', line_stripped):
             # Next non-empty line might be section header
             for j in range(i + 1, min(i + 3, len(lines))):
                 next_line = lines[j].strip()
@@ -1588,6 +1631,65 @@ def score_impact_density(bullets: List[str]) -> Tuple[float, Dict[str, Any]]:
     return round(score, 1), stats
 
 
+AI_CLICHE_VERBS = {
+    # past tense (most common in resume bullets)
+    'spearheaded', 'leveraged', 'utilized', 'facilitated', 'ensured',
+    'demonstrated', 'collaborated', 'streamlined', 'championed', 'fostered',
+    'harnessed', 'navigated', 'liaised', 'interfaced',
+    # present/base forms
+    'spearhead', 'leverage', 'utilize', 'facilitate', 'ensure',
+    'demonstrate', 'collaborate', 'streamline', 'champion', 'foster',
+    'harness', 'navigate', 'liaise', 'interface',
+    # -ing forms
+    'spearheading', 'leveraging', 'utilizing', 'facilitating', 'ensuring',
+    'demonstrating', 'collaborating', 'streamlining', 'championing', 'fostering',
+    'harnessing', 'navigating', 'liaising', 'interfacing',
+}
+
+
+def score_burstiness(bullets: List[str]) -> Tuple[float, Dict[str, Any]]:
+    """
+    Score sentence-length variability (burstiness).
+    Coefficient of variation (std_dev / mean) of word counts.
+    CV >= 0.40 = 100 (human-like), CV < 0.10 = 10 (AI-uniform).
+    Also penalizes AI cliché verbs (max -15).
+    """
+    if not bullets or len(bullets) < 3:
+        return 50, {'note': 'too few bullets'}
+    word_counts = [len(b.split()) for b in bullets if b.strip()]
+    mean_wc = sum(word_counts) / len(word_counts)
+    std_dev = (sum((w - mean_wc) ** 2 for w in word_counts) / len(word_counts)) ** 0.5
+    cv = std_dev / mean_wc if mean_wc else 0
+
+    if cv >= 0.40:
+        score = 100
+    elif cv >= 0.30:
+        score = 85 + (cv - 0.30) / 0.10 * 15
+    elif cv >= 0.20:
+        score = 60 + (cv - 0.20) / 0.10 * 25
+    elif cv >= 0.10:
+        score = 30 + (cv - 0.10) / 0.10 * 30
+    else:
+        score = max(10, cv / 0.10 * 30)
+
+    cliche_hits = [
+        b for b in bullets
+        if b.strip() and b.strip().split()[0].lower().rstrip('.,;:') in AI_CLICHE_VERBS
+    ]
+    cliche_ratio = len(cliche_hits) / len(bullets)
+    cliche_penalty = min(15, cliche_ratio * 30)
+
+    return round(max(10, score - cliche_penalty), 1), {
+        'word_counts': word_counts,
+        'mean_word_count': round(mean_wc, 1),
+        'std_dev': round(std_dev, 1),
+        'coefficient_variation': round(cv, 3),
+        'cliche_count': len(cliche_hits),
+        'cliche_examples': [b[:70] for b in cliche_hits[:3]],
+        'cliche_penalty': round(cliche_penalty, 1),
+    }
+
+
 def score_competitive(
     schools: List[EducationEntry],
     companies: List[str],
@@ -1729,27 +1831,27 @@ def extract_job_fit_requirements(jd_text: str, jd_title: str) -> JobRequirements
     Enhanced JD parsing to extract job fit requirements.
     Thinks like HR: what does this role REALLY need?
     """
-    jd_lower = jd_text.lower()
+    jd_match_text = normalize_match_text(jd_text)
     requirements = JobRequirements(raw_text=jd_text, title=jd_title)
 
     # Extract therapeutic areas mentioned
     for ta in THERAPEUTIC_ADJACENCY.keys():
-        if ta in jd_lower:
+        if contains_term(jd_match_text, ta):
             requirements.therapeutic_areas.append(ta)
         # Also check direct synonyms
         adjacency = THERAPEUTIC_ADJACENCY.get(ta, {})
         for synonym in adjacency.get('direct', []):
-            if synonym in jd_lower and ta not in requirements.therapeutic_areas:
+            if contains_term(jd_match_text, synonym) and ta not in requirements.therapeutic_areas:
                 requirements.therapeutic_areas.append(ta)
 
     # Extract experience types
     for exp_type in EXPERIENCE_TRANSFERABILITY.keys():
-        if exp_type.replace('_', ' ') in jd_lower or exp_type in jd_lower:
+        if contains_term(jd_match_text, exp_type.replace('_', ' ')) or contains_term(jd_match_text, exp_type):
             requirements.experience_types.append(exp_type)
         # Check direct synonyms
         exp_data = EXPERIENCE_TRANSFERABILITY.get(exp_type, {})
         for synonym in exp_data.get('direct', []):
-            if synonym in jd_lower and exp_type not in requirements.experience_types:
+            if contains_term(jd_match_text, synonym) and exp_type not in requirements.experience_types:
                 requirements.experience_types.append(exp_type)
 
     # Extract phase requirements
@@ -1800,8 +1902,8 @@ def extract_job_fit_requirements(jd_text: str, jd_title: str) -> JobRequirements
     industry_signals = ['pharma', 'biotech', 'industry', 'drug development', 'sponsor']
     academic_signals = ['academic', 'university', 'teaching', 'faculty', 'professor']
 
-    industry_count = sum(1 for s in industry_signals if s in jd_lower)
-    academic_count = sum(1 for s in academic_signals if s in jd_lower)
+    industry_count = sum(1 for s in industry_signals if contains_term(jd_match_text, s))
+    academic_count = sum(1 for s in academic_signals if contains_term(jd_match_text, s))
     requirements.is_industry_role = industry_count >= academic_count
 
     return requirements
@@ -1825,7 +1927,7 @@ def score_therapeutic_area_fit(
     if not required_areas:
         return 80, "No specific therapeutic area required", []
 
-    candidate_lower = candidate_text.lower()
+    candidate_match_text = normalize_match_text(candidate_text)
     matched_areas = []
     match_details = []
 
@@ -1844,6 +1946,8 @@ def score_therapeutic_area_fit(
     # Weak indicators - just mentions, not real work experience
     weak_indicators = ['publication', 'published', 'article', 'paper', 'literature review',
                        'book chapter', 'journal', 'cureus', 'peer-reviewed']
+    normalized_work_indicators = [normalize_match_text(ind) for ind in work_indicators]
+    normalized_weak_indicators = [normalize_match_text(ind) for ind in weak_indicators]
 
     for area in required_areas:
         adjacency = THERAPEUTIC_ADJACENCY.get(area, {})
@@ -1852,18 +1956,18 @@ def score_therapeutic_area_fit(
         # Check for ACTUAL work experience (look for work context)
         has_work_experience = False
         for term in area_terms:
-            if term in candidate_lower:
+            if contains_term(candidate_match_text, term):
                 # Check if it's in a work context vs just a mention
                 # Look for the term near work indicators
-                term_positions = [m.start() for m in re.finditer(re.escape(term), candidate_lower)]
+                term_positions = find_term_positions(candidate_match_text, term)
                 for pos in term_positions:
                     context_start = max(0, pos - 100)
-                    context_end = min(len(candidate_lower), pos + 100)
-                    context = candidate_lower[context_start:context_end]
+                    context_end = min(len(candidate_match_text), pos + 100)
+                    context = candidate_match_text[context_start:context_end]
 
                     # Check if this is work experience or just a publication mention
-                    is_work = any(ind in context for ind in work_indicators)
-                    is_weak = any(ind in context for ind in weak_indicators)
+                    is_work = any(ind in context for ind in normalized_work_indicators)
+                    is_weak = any(ind in context for ind in normalized_weak_indicators)
 
                     if is_work and not is_weak:
                         has_work_experience = True
@@ -1878,7 +1982,7 @@ def score_therapeutic_area_fit(
             continue
 
         # Check if area is mentioned but only in publications (low credit)
-        area_mentioned = any(term in candidate_lower for term in area_terms)
+        area_mentioned = any(contains_term(candidate_match_text, term) for term in area_terms)
         if area_mentioned:
             matched_areas.append((area, 'mention_only', 30))
             match_details.append(f"CAUTION: {area.title()} mentioned (publications only, no direct experience)")
@@ -1887,7 +1991,7 @@ def score_therapeutic_area_fit(
         # Check related experience (partial credit, honest about gap)
         related_match = False
         for related in adjacency.get('related', []):
-            if related in candidate_lower:
+            if contains_term(candidate_match_text, related):
                 matched_areas.append((area, 'related', 50))
                 match_details.append(f"Related but different: {related.title()} (not direct {area.title()})")
                 related_match = True
@@ -1899,7 +2003,7 @@ def score_therapeutic_area_fit(
         # Check transferable experience (low credit - being honest)
         transferable_match = False
         for transferable in adjacency.get('transferable', []):
-            if transferable in candidate_lower:
+            if contains_term(candidate_match_text, transferable):
                 matched_areas.append((area, 'transferable', 35))
                 match_details.append(f"Transferable only: {transferable.title()} (significant ramp-up needed for {area.title()})")
                 transferable_match = True
@@ -2697,7 +2801,7 @@ def generate_interview_questions(
 
 def result_to_dict(result: HRScoreResult) -> Dict[str, Any]:
     """Convert HRScoreResult to JSON-serializable dictionary"""
-    return {
+    d = {
         "overall_score": result.overall_score,
         "recommendation": result.recommendation,
         "rating_label": result.rating_label,
@@ -2710,6 +2814,9 @@ def result_to_dict(result: HRScoreResult) -> Dict[str, Any]:
         "candidate_tags": result.candidate_tags,
         "weights_used": {k: round(v, 2) for k, v in result.weights_used.items()}
     }
+    if result.writing_quality:
+        d["writing_quality"] = result.writing_quality
+    return d
 
 
 def calculate_hr_score_from_text(resume_text: str, jd_text: str) -> "HRScoreResult":
@@ -2827,7 +2934,16 @@ def calculate_hr_score_from_text(resume_text: str, jd_text: str) -> "HRScoreResu
     penalty_total, penalty_breakdown, penalty_concerns = calculate_penalties(candidate.jobs, resume_text, jd)
     concerns.extend(penalty_concerns)
 
-    final_score = max(0, min(100, raw_score - penalty_total + f_pattern_adjustment + text_block_penalty + page_length_penalty))
+    burstiness_score, burstiness_stats = score_burstiness(candidate.all_bullets)
+    cv = burstiness_stats.get('coefficient_variation', 0)
+    if cv < 0.15:
+        burstiness_penalty = -8
+    elif cv < 0.25:
+        burstiness_penalty = -4
+    else:
+        burstiness_penalty = 0
+
+    final_score = max(0, min(100, raw_score - penalty_total + f_pattern_adjustment + text_block_penalty + page_length_penalty + burstiness_penalty))
 
     job_fit_is_low = scores.job_fit < 60
     job_fit_is_marginal = 60 <= scores.job_fit < 75
@@ -2848,6 +2964,13 @@ def calculate_hr_score_from_text(resume_text: str, jd_text: str) -> "HRScoreResu
     data_completeness = min(100, len(candidate.jobs) * 15 + len(candidate.all_bullets) * 2)
     confidence = f"{'High' if data_completeness > 70 else 'Medium' if data_completeness > 40 else 'Low'} ({data_completeness:.0f}%)"
 
+    writing_quality = {
+        **burstiness_stats,
+        'burstiness_score': burstiness_score,
+        'burstiness_penalty': burstiness_penalty,
+        'quantification_rate': impact_stats.get('density', 0),
+    }
+
     return HRScoreResult(
         overall_score=round(final_score, 1),
         recommendation=recommendation,
@@ -2860,6 +2983,7 @@ def calculate_hr_score_from_text(resume_text: str, jd_text: str) -> "HRScoreResu
         suggested_questions=questions[:4],
         candidate_tags=candidate.tags,
         weights_used=weights,
+        writing_quality=writing_quality,
     )
 
 

@@ -44,6 +44,8 @@ except ImportError:
 import threading
 _sbert_model = None
 _sbert_lock = threading.Lock()
+_sbert_load_failed = False
+_sbert_load_error = None
 
 try:
     from sentence_transformers import SentenceTransformer, util as sbert_util
@@ -55,11 +57,20 @@ except ImportError:
 
 def get_sbert_model():
     """Thread-safe lazy loading of SBERT model. Loads once on first call."""
-    global _sbert_model
-    if _sbert_model is None and SBERT_AVAILABLE:
+    global _sbert_model, _sbert_load_failed, _sbert_load_error, SBERT_AVAILABLE
+    if not SBERT_AVAILABLE or _sbert_load_failed:
+        return None
+
+    if _sbert_model is None:
         with _sbert_lock:
-            if _sbert_model is None:
-                _sbert_model = SentenceTransformer('all-MiniLM-L6-v2')
+            if _sbert_model is None and not _sbert_load_failed:
+                try:
+                    _sbert_model = SentenceTransformer('all-MiniLM-L6-v2')
+                except Exception as exc:
+                    _sbert_load_failed = True
+                    _sbert_load_error = str(exc)
+                    SBERT_AVAILABLE = False
+                    _sbert_model = None
     return _sbert_model
 
 # =============================================================================
@@ -425,13 +436,13 @@ def calculate_semantic_similarity(resume_text: str, jd_text: str) -> Tuple[float
         details: Dictionary with embedding details
     """
     if not SBERT_AVAILABLE:
-        return 0, {'available': False, 'message': 'sentence-transformers not installed'}
+        return 0, {'available': False, 'message': _sbert_load_error or 'sentence-transformers not installed'}
 
     try:
         resume_embedding = embed_with_cache(resume_text)
         jd_embedding = embed_with_cache(jd_text)
         if resume_embedding is None or jd_embedding is None:
-            return 0, {'available': False, 'message': 'Model not loaded'}
+            return 0, {'available': False, 'message': _sbert_load_error or 'Model not loaded'}
 
         import torch
         resume_tensor = torch.tensor(resume_embedding)
@@ -2047,6 +2058,29 @@ def clean_text(text):
     return text.strip()
 
 
+def normalize_match_term(term: str) -> str:
+    """Normalize a search term using the same cleaning rules as document text."""
+    return clean_text(term).strip()
+
+
+def contains_normalized_term(normalized_text: str, normalized_tokens: set, term: str) -> bool:
+    """
+    Match a term against cleaned text without allowing substring false positives.
+
+    Single-token terms must match a full token. Multi-token or slash/hyphen terms
+    use boundary-aware regex matching on the normalized text.
+    """
+    normalized_term = normalize_match_term(term)
+    if not normalized_term:
+        return False
+
+    if ' ' not in normalized_term and '/' not in normalized_term and '-' not in normalized_term:
+        return normalized_term in normalized_tokens
+
+    pattern = r'(?<!\w)' + re.escape(normalized_term) + r'(?!\w)'
+    return re.search(pattern, normalized_text) is not None
+
+
 def is_valid_skill(term, domain=None):
     """Check if a term is a recognized skill via O*NET + domain keywords + skill taxonomy.
 
@@ -2374,6 +2408,8 @@ def calculate_weighted_score(resume_text, jd_text, domain=None):
 
     cleaned_resume = clean_text(expanded_resume)
     cleaned_jd = clean_text(expanded_jd)
+    resume_tokens = set(cleaned_resume.split())
+    jd_tokens = set(cleaned_jd.split())
 
     total_weight = 0
     matched_weight = 0
@@ -2381,14 +2417,14 @@ def calculate_weighted_score(resume_text, jd_text, domain=None):
     missing_terms = []
 
     for term, weight in domain_kw.items():
-        if term in cleaned_jd:
+        if contains_normalized_term(cleaned_jd, jd_tokens, term):
             total_weight += weight
             # Check direct match
-            if term in cleaned_resume:
+            if contains_normalized_term(cleaned_resume, resume_tokens, term):
                 matched_weight += weight
                 matched_terms.append((term, weight))
             # Check lemmatized match
-            elif lemmatize_word(term) in cleaned_resume:
+            elif contains_normalized_term(cleaned_resume, resume_tokens, lemmatize_word(term)):
                 matched_weight += weight * 0.9  # Slightly lower for lemma match
                 matched_terms.append((term + "*", weight))
             else:

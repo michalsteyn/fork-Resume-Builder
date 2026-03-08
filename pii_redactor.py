@@ -10,6 +10,7 @@ Usage:
     cleaned = redact_text(resume_text)
 """
 
+import importlib.util
 import re
 from typing import List, Optional, Set
 
@@ -62,16 +63,10 @@ def get_analyzer():
     if not PRESIDIO_AVAILABLE:
         return None
 
-    # Build NLP engine (uses spaCy en_core_web_lg if available, else en_core_web_sm)
-    try:
-        configuration = {
-            "nlp_engine_name": "spacy",
-            "models": [{"lang_code": "en", "model_name": "en_core_web_lg"}],
-        }
-        provider = NlpEngineProvider(nlp_configuration=configuration)
-        nlp_engine = provider.create_engine()
-    except Exception:
-        # Fall back to smaller model
+    # Do not trigger spaCy model downloads at runtime. On Fly's 1 GB VM, the
+    # large English model can OOM the instance during first LLM request.
+    nlp_engine = None
+    if importlib.util.find_spec("en_core_web_sm") is not None:
         try:
             configuration = {
                 "nlp_engine_name": "spacy",
@@ -80,13 +75,12 @@ def get_analyzer():
             provider = NlpEngineProvider(nlp_configuration=configuration)
             nlp_engine = provider.create_engine()
         except Exception:
-            # Last resort: default engine
             nlp_engine = None
 
-    if nlp_engine:
-        _analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
-    else:
-        _analyzer = AnalyzerEngine(supported_languages=["en"])
+    if nlp_engine is None:
+        return None
+
+    _analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
 
     # --- Custom recognizers ---
 

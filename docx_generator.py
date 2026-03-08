@@ -44,78 +44,97 @@ def set_font(run, font_name='Times New Roman', size=11, bold=False):
     run._element.rPr.rFonts.set(qn('w:eastAsia'), font_name)
 
 
-def add_horizontal_line(doc):
-    """Add a simple horizontal line separator."""
+def _set_line_spacing(p, multiple=1.08):
+    """Set paragraph line spacing as a multiple of single (240-unit) spacing."""
+    pPr = p._p.get_or_add_pPr()
+    spacing = pPr.find(qn('w:spacing'))
+    if spacing is None:
+        spacing = OxmlElement('w:spacing')
+        pPr.append(spacing)
+    spacing.set(qn('w:line'), str(int(240 * multiple)))
+    spacing.set(qn('w:lineRule'), 'auto')
+
+
+def add_horizontal_line(doc, thick=False):
+    """Add a proper hairline paragraph-border rule (replaces underscore text)."""
     p = doc.add_paragraph()
-    p.paragraph_format.space_before = Pt(6)
-    p.paragraph_format.space_after = Pt(6)
-    run = p.add_run('_' * 85)
-    set_font(run, font_name='Times New Roman', size=11)
-    run.font.color.rgb = RGBColor(128, 128, 128)
+    p.paragraph_format.space_before = Pt(4)
+    p.paragraph_format.space_after = Pt(0)
+    pPr = p._p.get_or_add_pPr()
+    pBdr = OxmlElement('w:pBdr')
+    bottom = OxmlElement('w:bottom')
+    bottom.set(qn('w:val'), 'single')
+    bottom.set(qn('w:sz'), '8' if thick else '6')   # 1pt thick or 0.75pt hairline
+    bottom.set(qn('w:space'), '1')
+    bottom.set(qn('w:color'), '000000')
+    pBdr.append(bottom)
+    pPr.append(pBdr)
 
 
 def _setup_heading_style(doc):
     """
-    Configure the document's Heading 1 style to match ATS formatting.
+    Create a custom 'SectionHeader' style based on Normal (not Heading 1).
 
-    Workday and most ATS parsers use Word's built-in Heading styles as XML-level
-    semantic signals to identify section boundaries (Professional Experience,
-    Education, etc.). Without Heading styles, parsers rely on text heuristics only,
-    which causes job title, company name, and education fields to fail autofill.
-
-    We override Heading 1's default appearance (large blue font) to match our
-    11pt bold all-caps black Times New Roman design.
+    Using a Normal-based style avoids Word's collapse/expand toggle triangle
+    that appears on all built-in Heading styles. ATS parsers like Workday
+    identify sections via ALL-CAPS text heuristics and bold formatting,
+    which this custom style preserves.
     """
     styles = doc.styles
     try:
-        h1 = styles['Heading 1']
-        h1.font.name = 'Times New Roman'
-        h1.font.size = Pt(11)
-        h1.font.bold = True
-        h1.font.color.rgb = RGBColor(0, 0, 0)
-        h1.font.italic = False
-        h1.paragraph_format.space_before = Pt(12)
-        h1.paragraph_format.space_after = Pt(6)
-        h1.paragraph_format.keep_with_next = True
-        # Remove left indent that Heading 1 sometimes adds
-        h1.paragraph_format.left_indent = Pt(0)
+        # Create custom style based on Normal to avoid toggle triangles
+        if 'SectionHeader' not in [s.name for s in styles]:
+            from docx.enum.style import WD_STYLE_TYPE
+            sh = styles.add_style('SectionHeader', WD_STYLE_TYPE.PARAGRAPH)
+            sh.base_style = styles['Normal']
+            sh.font.name = 'Times New Roman'
+            sh.font.size = Pt(11)
+            sh.font.bold = True
+            sh.font.color.rgb = RGBColor(0, 0, 0)
+            sh.font.italic = False
+            sh.paragraph_format.space_before = Pt(12)
+            sh.paragraph_format.space_after = Pt(6)
+            sh.paragraph_format.keep_with_next = True
+            sh.paragraph_format.left_indent = Pt(0)
     except Exception:
-        pass  # If style modification fails, fall back gracefully
+        pass  # If style creation fails, add_section_header falls back to Normal
 
 
 def add_section_header(doc, text):
     """
-    Add an all-caps section header using Word's Heading 1 style.
+    Add an all-caps section header using a custom Normal-based style.
 
-    Using Heading 1 provides XML-level semantic signals to ATS parsers like Workday,
-    helping them correctly identify section boundaries and auto-fill job title,
-    company name, and education fields. Run-level formatting overrides the style's
-    default appearance to maintain our visual design.
+    Uses 'SectionHeader' style (based on Normal, not Heading 1) to avoid
+    Word's collapse/expand toggle triangle. ATS parsers identify sections
+    via ALL-CAPS bold text, which this approach preserves.
     """
-    p = doc.add_paragraph(style='Heading 1')
+    try:
+        p = doc.add_paragraph(style='SectionHeader')
+    except KeyError:
+        p = doc.add_paragraph()
     p.paragraph_format.space_before = Pt(12)
     p.paragraph_format.space_after = Pt(6)
-    p.paragraph_format.keep_with_next = True  # Keep header with following content
+    p.paragraph_format.keep_with_next = True
     p.paragraph_format.left_indent = Pt(0)
-
-    # Remove any automatic list numbering from Heading 1 style
-    pPr = p._p.get_or_add_pPr()
-    numPr = pPr.find(qn('w:numPr'))
-    if numPr is not None:
-        pPr.remove(numPr)
 
     run = p.add_run(text.upper())
     set_font(run, font_name='Times New Roman', size=11, bold=True)
     # Override Heading 1 default color (usually blue/accent) to solid black
     run.font.color.rgb = RGBColor(0, 0, 0)
     run.font.italic = False
+    # Add 0.75pt letter-spacing — hallmark of professional academic headers in TNR
+    rPr = run._element.get_or_add_rPr()
+    spacing_el = OxmlElement('w:spacing')
+    spacing_el.set(qn('w:val'), '15')   # 15 twentieths-of-pt = 0.75pt
+    rPr.append(spacing_el)
 
 
 def add_bullet_point(doc, text, bold_parts=None):
     """Add a bullet point with optional bold parts."""
     p = doc.add_paragraph(style='List Bullet')
-    p.paragraph_format.space_after = Pt(3)
+    p.paragraph_format.space_after = Pt(2)
     p.paragraph_format.left_indent = Inches(0.25)
+    _set_line_spacing(p, 1.08)
 
     if bold_parts:
         # Split text and bold specific parts
@@ -136,6 +155,86 @@ def add_bullet_point(doc, text, bold_parts=None):
         run = p.add_run(text)
         set_font(run, font_name='Times New Roman', size=11)
 
+    return p
+
+
+def _render_citation_runs(p, text, prefix=""):
+    """
+    Render a citation string into runs on paragraph p with:
+    - Bold year
+    - Italic journal / conference name (the segment between the last '. ' and the year,
+      for journal-format citations where the year is followed by ';' or digits)
+    Falls back to plain+bold-year for non-standard formats.
+    """
+    full = prefix + text
+    FN = 'Times New Roman'
+    SZ = 10
+
+    year_m = re.search(r'\b((?:19|20)\d{2})\b', full)
+    if not year_m:
+        run = p.add_run(full)
+        set_font(run, FN, SZ)
+        return
+
+    year_str = year_m.group(1)
+    y_start = year_m.start()
+    before_year = full[:y_start]
+    after_year = full[y_start + len(year_str):]
+
+    # Detect journal-article format: year immediately followed by ";" or digit (vol/issue)
+    after_stripped = after_year.lstrip()
+    is_journal = after_stripped.startswith(';') or (after_stripped and after_stripped[0].isdigit())
+
+    if is_journal:
+        # Find journal name: segment from last ". " before year to year (stripped of trailing .,; )
+        last_sep = max(before_year.rfind('. '), before_year.rfind('? '))
+        if last_sep != -1:
+            pre_journal = full[:last_sep + 2]       # includes the ". "
+            journal_raw = before_year[last_sep + 2:].rstrip('. ;,')
+            post_journal = before_year[last_sep + 2 + len(journal_raw):]  # any ". " after journal
+            # Only italicise if it looks like a real journal name (3–80 chars, not a year)
+            if 3 <= len(journal_raw) <= 80 and not re.match(r'^\d', journal_raw):
+                if pre_journal:
+                    r = p.add_run(pre_journal)
+                    set_font(r, FN, SZ)
+                r = p.add_run(journal_raw)
+                set_font(r, FN, SZ)
+                r.font.italic = True
+                if post_journal:
+                    r = p.add_run(post_journal)
+                    set_font(r, FN, SZ)
+                yr = p.add_run(year_str)
+                set_font(yr, FN, SZ, bold=True)
+                if after_year:
+                    r = p.add_run(after_year)
+                    set_font(r, FN, SZ)
+                return  # success path
+
+    # Fallback: just bold the year, no journal italic
+    if before_year:
+        r = p.add_run(before_year)
+        set_font(r, FN, SZ)
+    yr = p.add_run(year_str)
+    set_font(yr, FN, SZ, bold=True)
+    if after_year:
+        r = p.add_run(after_year)
+        set_font(r, FN, SZ)
+
+
+def add_publication_entry(doc, text, number=None):
+    """
+    Add a publication citation with hanging indent (academic reference style).
+    Long citations wrap cleanly: first line flush-left, continuation indented 0.35".
+    Year is bold; journal/conference name is italic for journal-format citations.
+    """
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(2)
+    p.paragraph_format.space_after = Pt(5)
+    p.paragraph_format.left_indent = Inches(0.35)
+    p.paragraph_format.first_line_indent = Inches(-0.35)  # Hanging indent
+
+    prefix = f"{number}.\u2002" if number else ""  # en-space after period
+    _render_citation_runs(p, text, prefix=prefix)
     return p
 
 
@@ -222,35 +321,52 @@ def create_ats_resume(
         section.left_margin = Inches(0.6)
         section.right_margin = Inches(0.6)
 
-    # ===== NAME (Bold, Centered) =====
+    # ===== NAME (Bold, Centered, 15pt) =====
     name_para = doc.add_paragraph()
     name_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    name_para.paragraph_format.space_after = Pt(2)
     name_run = name_para.add_run(name.upper())
-    set_font(name_run, font_name='Times New Roman', size=14, bold=True)
+    set_font(name_run, font_name='Times New Roman', size=15, bold=True)
 
     # ===== CONTACT INFO (In main body, not header) =====
+    # Use middle-dot separator and filter out empty fields
+    SEP = '  \u00B7  '   # middle dot with en-spaces
+    contact_parts = []
+    city_state = f"{contact_info.get('city', '')}, {contact_info.get('state', '')} {contact_info.get('zip', '')}".strip(' ,')
+    if city_state.strip():
+        contact_parts.append(city_state.strip())
+    if contact_info.get('phone', '').strip():
+        contact_parts.append(contact_info['phone'].strip())
+    if contact_info.get('email', '').strip():
+        contact_parts.append(contact_info['email'].strip())
+
     contact_para = doc.add_paragraph()
     contact_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    contact_para.paragraph_format.space_before = Pt(0)
     contact_para.paragraph_format.space_after = Pt(0)
-
-    contact_line = f"{contact_info.get('city', '')}, {contact_info.get('state', '')} {contact_info.get('zip', '')} | {contact_info.get('phone', '')} | {contact_info.get('email', '')}"
-    contact_run = contact_para.add_run(contact_line)
-    set_font(contact_run, font_name='Times New Roman', size=11)
+    contact_run = contact_para.add_run(SEP.join(contact_parts))
+    set_font(contact_run, font_name='Times New Roman', size=10.5)
 
     # LinkedIn/Portfolio on second line
     if contact_info.get('linkedin'):
         link_para = doc.add_paragraph()
         link_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        link_para.paragraph_format.space_before = Pt(0)
+        link_para.paragraph_format.space_before = Pt(1)
+        link_para.paragraph_format.space_after = Pt(0)
         link_run = link_para.add_run(contact_info['linkedin'])
-        set_font(link_run, font_name='Times New Roman', size=11)
+        set_font(link_run, font_name='Times New Roman', size=10.5)
+
+    # Thicker rule closes the header block
+    add_horizontal_line(doc, thick=True)
 
     # ===== PROFESSIONAL SUMMARY =====
-    add_horizontal_line(doc)
     add_section_header(doc, 'PROFESSIONAL SUMMARY')
 
     summary_para = doc.add_paragraph()
+    summary_para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    summary_para.paragraph_format.space_before = Pt(2)
     summary_para.paragraph_format.space_after = Pt(6)
+    _set_line_spacing(summary_para, 1.08)
     summary_run = summary_para.add_run(summary)
     set_font(summary_run, font_name='Times New Roman', size=11)
 
@@ -258,39 +374,48 @@ def create_ats_resume(
     add_horizontal_line(doc)
     add_section_header(doc, 'CORE COMPETENCIES')
 
-    # Display as linear bullet list (NOT columns)
-    for competency in core_competencies:
-        add_bullet_point(doc, competency)
+    # Display 3 competencies per row separated by middle-dot — compact and ATS-safe
+    ROW = 3
+    for i in range(0, len(core_competencies), ROW):
+        row_items = core_competencies[i:i + ROW]
+        row_text = '  \u00B7  '.join(row_items)
+        comp_para = doc.add_paragraph(style='List Bullet')
+        comp_para.paragraph_format.space_after = Pt(2)
+        comp_para.paragraph_format.left_indent = Inches(0.25)
+        comp_run = comp_para.add_run(row_text)
+        set_font(comp_run, font_name='Times New Roman', size=11)
 
     # ===== PROFESSIONAL EXPERIENCE =====
     add_horizontal_line(doc)
     add_section_header(doc, 'PROFESSIONAL EXPERIENCE')
 
     for job in experience:
-        # Job Title on its own line (bold) - ATS parsers expect title on separate line
+        # Line 1: JOB TITLE (bold, ALL-CAPS, left) .......... Dates (italic, right-aligned)
         title_para = doc.add_paragraph()
         title_para.paragraph_format.space_before = Pt(10)
-        title_para.paragraph_format.space_after = Pt(0)
+        title_para.paragraph_format.space_after = Pt(1)
+        if job.get('dates'):
+            title_para.paragraph_format.tab_stops.add_tab_stop(
+                Inches(6.5), WD_TAB_ALIGNMENT.RIGHT
+            )
         title_run = title_para.add_run(job['title'].upper())
         set_font(title_run, font_name='Times New Roman', size=11, bold=True)
+        if job.get('dates'):
+            title_para.add_run('\t')
+            dates_run = title_para.add_run(job['dates'])
+            set_font(dates_run, font_name='Times New Roman', size=11)
+            dates_run.font.italic = True
 
-        # Company | Location on second line
+        # Line 2: Company Name, Location (italic)
         company_para = doc.add_paragraph()
         company_para.paragraph_format.space_before = Pt(0)
-        company_para.paragraph_format.space_after = Pt(0)
-        company_run = company_para.add_run(job['company'])
-        set_font(company_run, font_name='Times New Roman', size=11)
+        company_para.paragraph_format.space_after = Pt(3)
+        company_text = job['company']
         if job.get('location'):
-            loc_run = company_para.add_run(f" | {job['location']}")
-            set_font(loc_run, font_name='Times New Roman', size=11)
-
-        # Dates on third line
-        dates_para = doc.add_paragraph()
-        dates_para.paragraph_format.space_before = Pt(0)
-        dates_para.paragraph_format.space_after = Pt(4)
-        dates_run = dates_para.add_run(job['dates'])
-        set_font(dates_run, font_name='Times New Roman', size=11)
-        dates_run.font.italic = True
+            company_text += f", {job['location']}"
+        company_run = company_para.add_run(company_text)
+        set_font(company_run, font_name='Times New Roman', size=11)
+        company_run.font.italic = True
 
         # Bullet points with metrics bolded
         for bullet in job.get('bullets', []):
@@ -302,24 +427,32 @@ def create_ats_resume(
     add_section_header(doc, 'EDUCATION')
 
     for edu in education:
+        # Line 1: Degree name (bold, left) — Dates (italic, right-aligned)
         edu_para = doc.add_paragraph()
-        edu_para.paragraph_format.space_after = Pt(2)
-
-        # Degree (bold)
+        edu_para.paragraph_format.space_before = Pt(8)
+        edu_para.paragraph_format.space_after = Pt(1)
+        if edu.get('dates'):
+            edu_para.paragraph_format.tab_stops.add_tab_stop(
+                Inches(6.5), WD_TAB_ALIGNMENT.RIGHT
+            )
         degree_run = edu_para.add_run(edu['degree'])
         set_font(degree_run, font_name='Times New Roman', size=11, bold=True)
+        if edu.get('dates'):
+            edu_para.add_run('\t')
+            dates_run = edu_para.add_run(edu['dates'])
+            set_font(dates_run, font_name='Times New Roman', size=11)
+            dates_run.font.italic = True
 
-        # School and location
+        # Line 2: School, Location (italic)
         school_para = doc.add_paragraph()
         school_para.paragraph_format.space_before = Pt(0)
-        school_para.paragraph_format.space_after = Pt(6)
-        school_text = f"{edu['school']}"
+        school_para.paragraph_format.space_after = Pt(4)
+        school_text = edu.get('school', '')
         if edu.get('location'):
             school_text += f", {edu['location']}"
-        if edu.get('dates'):
-            school_text += f" | {edu['dates']}"
         school_run = school_para.add_run(school_text)
         set_font(school_run, font_name='Times New Roman', size=11)
+        school_run.font.italic = True
 
     # ===== CERTIFICATIONS & LICENSURE =====
     if certifications:
@@ -338,17 +471,17 @@ def create_ats_resume(
             # Dict format: {'Category Name': ['pub1', 'pub2'], ...}
             for category, pubs in publications.items():
                 cat_para = doc.add_paragraph()
-                cat_para.paragraph_format.space_before = Pt(6)
-                cat_para.paragraph_format.space_after = Pt(2)
+                cat_para.paragraph_format.space_before = Pt(8)
+                cat_para.paragraph_format.space_after = Pt(3)
                 cat_run = cat_para.add_run(category)
                 set_font(cat_run, font_name='Times New Roman', size=11, bold=True)
                 cat_run.font.italic = True
-                for pub in pubs:
-                    add_bullet_point(doc, pub)
+                for i, pub in enumerate(pubs, 1):
+                    add_publication_entry(doc, pub, number=i)
         else:
             # List format: ['pub1', 'pub2', ...]
-            for pub in publications:
-                add_bullet_point(doc, pub)
+            for i, pub in enumerate(publications, 1):
+                add_publication_entry(doc, pub, number=i)
 
     # ===== PROFESSIONAL MEMBERSHIPS (Optional) =====
     if professional_memberships:
@@ -1097,6 +1230,47 @@ def _parse_school_location(school_loc: str, edu_entry: dict):
         edu_entry['school'] = school_loc
 
 
+_KNOWN_SECTION_HEADERS = [
+    'PROFESSIONAL SUMMARY', 'SUMMARY', 'CORE COMPETENCIES', 'COMPETENCIES',
+    'PROFESSIONAL EXPERIENCE', 'WORK EXPERIENCE', 'EXPERIENCE',
+    'EDUCATION', 'CERTIFICATIONS', 'LICENSURE', 'PUBLICATIONS',
+    'PROFESSIONAL MEMBERSHIPS', 'MEMBERSHIPS', 'AWARDS', 'HONORS',
+    'SKILLS', 'LANGUAGES', 'VOLUNTEER',
+]
+
+
+def _is_known_section_header(line: str) -> bool:
+    upper = line.strip().upper()
+    return any(h in upper for h in _KNOWN_SECTION_HEADERS)
+
+
+def _preprocess_resume_md(md_text: str) -> str:
+    """Remove ___ separator lines that are NOT immediately before a known section header.
+
+    Resumes often use ___ between individual job entries within PROFESSIONAL EXPERIENCE.
+    Those separators cause parse_resume_markdown to treat each job as its own section,
+    silently dropping all but the first job. This function removes intra-section separators
+    while preserving inter-section separators.
+    """
+    lines = md_text.split('\n')
+    result = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if re.match(r'^_{3,}\s*$', line.strip()):
+            # Look ahead past blank lines to find the next non-blank line
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines) and _is_known_section_header(lines[j]):
+                result.append(line)  # keep: separates two real sections
+            # else: skip (intra-section separator between jobs)
+        else:
+            result.append(line)
+        i += 1
+    return '\n'.join(result)
+
+
 def parse_resume_markdown(md_text: str) -> dict:
     """
     Parse ATS/Workday-format resume markdown into a dict matching create_ats_resume() params.
@@ -1116,6 +1290,9 @@ def parse_resume_markdown(md_text: str) -> dict:
         'professional_memberships': [],
         'publications': None,
     }
+
+    # Remove intra-section separators (between jobs) before splitting
+    md_text = _preprocess_resume_md(md_text)
 
     # Split into sections by separator lines (3+ underscores)
     sections = re.split(r'\n_{3,}\n', md_text)
@@ -1191,14 +1368,22 @@ def parse_resume_markdown(md_text: str) -> dict:
         elif 'PROFESSIONAL EXPERIENCE' in header or 'EXPERIENCE' in header:
             jobs = []
             current_job = None
+            pending_title = None  # for TITLE\nCOMPANY | LOCATION two-line format
+            _date_re = re.compile(
+                r'(January|February|March|April|May|June|July|August|September|'
+                r'October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec|\d{4})'
+            )
             for line in body_lines:
                 stripped = line.strip()
                 if not stripped:
                     continue
 
-                # Job title line: contains | separators (TITLE | COMPANY | Location)
                 pipe_parts = [p.strip() for p in stripped.split('|')]
-                if len(pipe_parts) >= 3 and not stripped.startswith('\u2022') and not stripped.startswith('-'):
+                is_bullet = stripped.startswith('\u2022') or stripped.startswith('-')
+                has_date = bool(_date_re.search(stripped))
+
+                if len(pipe_parts) >= 3 and not is_bullet:
+                    # TITLE | COMPANY | Location (single-line format)
                     if current_job:
                         jobs.append(current_job)
                     current_job = {
@@ -1208,18 +1393,37 @@ def parse_resume_markdown(md_text: str) -> dict:
                         'dates': '',
                         'bullets': [],
                     }
-                elif current_job and not stripped.startswith('\u2022') and not stripped.startswith('-') and re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec|\d{4})', stripped):
+                    pending_title = None
+                elif len(pipe_parts) == 2 and not is_bullet and pending_title is not None:
+                    # COMPANY | Location following a standalone title line (two-line format)
+                    if current_job:
+                        jobs.append(current_job)
+                    current_job = {
+                        'title': pending_title,
+                        'company': pipe_parts[0],
+                        'location': pipe_parts[1],
+                        'dates': '',
+                        'bullets': [],
+                    }
+                    pending_title = None
+                elif not is_bullet and has_date:
                     # Date line
-                    if not current_job['dates']:
+                    if current_job and not current_job['dates']:
                         current_job['dates'] = stripped
-                elif current_job and (stripped.startswith('\u2022') or stripped.startswith('-')):
-                    bullet = re.sub(r'^[\u2022\-]\s*', '', stripped)
-                    current_job['bullets'].append(bullet)
-                elif current_job and current_job.get('bullets') is not None:
-                    # Non-bullet, non-title, non-date line inside a job = sub-header or continuation
-                    # Treat as a bullet if it looks like content
+                    pending_title = None
+                elif is_bullet:
+                    if current_job:
+                        bullet = re.sub(r'^[\u2022\-]\s*', '', stripped)
+                        current_job['bullets'].append(bullet)
+                    pending_title = None
+                elif len(pipe_parts) == 1 and not is_bullet and not has_date:
+                    # No pipes, not a bullet, not a date — potential standalone title
+                    pending_title = stripped
+                elif current_job:
+                    # Continuation line inside a job
                     if len(stripped) > 10 and not stripped.isupper():
                         current_job['bullets'].append(stripped)
+                    pending_title = None
 
             if current_job:
                 jobs.append(current_job)

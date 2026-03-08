@@ -43,8 +43,10 @@ from typing import Optional, List, Dict, Any
 from collections import defaultdict
 from datetime import datetime
 
+import asyncio
+
 from fastapi import FastAPI, HTTPException, Request, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -140,6 +142,8 @@ class ScoreRequest(BaseModel):
     # Options
     include_explanation: bool = Field(False, description="Include score explanation with improvement suggestions")
     domain_hint: Optional[str] = Field(None, description="Force domain: technology, finance, consulting, clinical_research, healthcare, pharma_biotech")
+    format_style: Optional[str] = Field(None, description="Resume format: ats (default), harvard, modern, executive")
+    include_llm_score: bool = Field(False, description="Run LLM evaluation after rewrite (adds ~20-30s)")
 
 
 class BatchScoreRequest(BaseModel):
@@ -165,6 +169,15 @@ class CoverLetterRequest(BaseModel):
     job_title: str = Field("", description="Job title (auto-detected if empty)")
 
 
+class RedFlagCoachRequest(BaseModel):
+    """Interactive LLM coach for fixing ATS/HR red flags."""
+    resume_text: str = Field("", description="Full text of the resume (blank = use saved resume)")
+    jd_text: str = Field(..., description="Full text of the job description")
+    score_context: Optional[Dict[str, Any]] = Field(None, description="Latest ATS/HR/LLM score payload from the UI")
+    chat_history: List[Dict[str, str]] = Field(default_factory=list, description="Ordered chat messages with roles and content")
+    domain_hint: Optional[str] = Field(None, description="Optional domain override")
+
+
 class JobDiscoverRequest(BaseModel):
     """Search for jobs and score them against a resume."""
     resume_text: str = Field("", description="Full text of the resume (blank = use saved resume)")
@@ -172,6 +185,27 @@ class JobDiscoverRequest(BaseModel):
     location: str = Field("", description="Geographic location filter")
     remote_only: bool = Field(False, description="Also search remote job boards")
     max_results: int = Field(10, ge=1, le=20, description="Number of top-scored jobs to return")
+
+
+class TrackerAddRequest(BaseModel):
+    """Add a job application to the tracker."""
+    company: str = Field("", description="Company name")
+    job_title: str = Field("", description="Job title")
+    status: str = Field("Applied", description="Application status")
+    resume_file: str = Field("", description="Resume filename")
+    cover_letter_file: str = Field("", description="Cover letter filename")
+    ats_score: float = Field(0.0, description="ATS score")
+    hr_score: float = Field(0.0, description="HR score")
+    llm_score: float = Field(0.0, description="LLM score")
+    notes: str = Field("", description="Notes")
+
+
+class TrackerUpdateRequest(BaseModel):
+    """Update a job application entry."""
+    status: Optional[str] = None
+    notes: Optional[str] = None
+    resume_file: Optional[str] = None
+    cover_letter_file: Optional[str] = None
 
 
 class FetchJDRequest(BaseModel):
@@ -469,6 +503,13 @@ def _log_score_usage(auth_context, endpoint: str):
             log_usage(auth_context["user_id"], endpoint)
         except Exception:
             pass  # Don't fail scoring if logging fails
+
+
+def _wants_event_stream(request: Request) -> bool:
+    """Enable SSE explicitly via Accept header or ?stream=true."""
+    accept = request.headers.get("Accept", "").lower()
+    stream_param = request.query_params.get("stream", "").lower()
+    return "text/event-stream" in accept or stream_param in {"1", "true", "yes"}
 
 
 # =============================================================================
@@ -896,7 +937,11 @@ def score_hr(req: ScoreRequest, api_key: str = Depends(verify_api_key_with_usage
             penalty_total, penalty_breakdown, penalty_concerns = hr_scorer.calculate_penalties(candidate.jobs, resume_text, jd)
             concerns.extend(penalty_concerns)
 
-            final_score = max(0, min(100, raw_score - penalty_total + f_pattern_adjustment))
+            burstiness_score, burstiness_stats = hr_scorer.score_burstiness(candidate.all_bullets)
+            bst_cv = burstiness_stats.get('coefficient_variation', 0)
+            bst_penalty = -8 if bst_cv < 0.15 else (-4 if bst_cv < 0.25 else 0)
+
+            final_score = max(0, min(100, raw_score - penalty_total + f_pattern_adjustment + bst_penalty))
 
             job_fit_is_low = scores.job_fit < 60
             job_fit_is_marginal = 60 <= scores.job_fit < 75
@@ -921,6 +966,13 @@ def score_hr(req: ScoreRequest, api_key: str = Depends(verify_api_key_with_usage
             data_completeness = min(100, len(candidate.jobs) * 15 + len(candidate.all_bullets) * 2)
             confidence = f"{'High' if data_completeness > 70 else 'Medium' if data_completeness > 40 else 'Low'} ({data_completeness:.0f}%)"
 
+            writing_quality = {
+                **burstiness_stats,
+                'burstiness_score': burstiness_score,
+                'burstiness_penalty': bst_penalty,
+                'quantification_rate': impact_stats.get('density', 0),
+            }
+
             result_obj = hr_scorer.HRScoreResult(
                 overall_score=round(final_score, 1),
                 recommendation=recommendation,
@@ -933,6 +985,7 @@ def score_hr(req: ScoreRequest, api_key: str = Depends(verify_api_key_with_usage
                 suggested_questions=questions[:4],
                 candidate_tags=candidate.tags,
                 weights_used=weights,
+                writing_quality=writing_quality,
             )
 
         result = hr_scorer.result_to_dict(result_obj)
@@ -948,63 +1001,46 @@ def score_hr(req: ScoreRequest, api_key: str = Depends(verify_api_key_with_usage
 
 
 @app.post("/score/both")
-def score_both(req: ScoreRequest, api_key: str = Depends(verify_api_key_with_usage)):
-    """Combined ATS + HR scoring in a single call. Most efficient for full analysis."""
+async def score_both(req: ScoreRequest, request: Request, api_key: str = Depends(verify_api_key_with_usage)):
+    """
+    ATS + HR scoring in one call.
+
+    Default response is JSON for compatibility with existing clients.
+    Set `Accept: text/event-stream` or `?stream=true` to receive SSE progress
+    events on Fly.io for long-running requests.
+    """
+    import json as _json
+
     req = _maybe_autofill_resume(req, api_key)
     resume_text, jd_text, file_path = resolve_inputs(req)
     _log_score_usage(api_key, "/score/both")
+    stream_response = _wants_event_stream(request)
 
-    # Check cache
-    cache_key = _cache_key(resume_text, jd_text, "both")
-    cached = _get_cached(cache_key)
-    if cached and not req.include_explanation:
-        cached["_cached"] = True
-        return JSONResponse(content=cached)
+    def _sse(obj: dict) -> str:
+        return f"data: {_json.dumps(obj)}\n\n"
 
-    try:
-        # ATS scoring
-        ats_result = ats_scorer.calculate_ats_score(resume_text, jd_text, file_path)
-        rating, likelihood, _color = ats_scorer.get_likelihood_rating(ats_result["total_score"])
-        ats_result["rating"] = rating
-        ats_result["likelihood"] = likelihood
+    def _run_ats():
+        result = ats_scorer.calculate_ats_score(resume_text, jd_text, file_path)
+        rating, likelihood, _ = ats_scorer.get_likelihood_rating(result["total_score"])
+        result["rating"] = rating
+        result["likelihood"] = likelihood
+        return result
 
-        # HR scoring (reuse parsed text)
-        # Use file-based if available for full HR analysis, otherwise text-based
-        if file_path:
-            hr_result_obj = hr_scorer.calculate_hr_score(file_path, req.jd_path or "")
-            # If jd_path not available, fall back to temp file approach
-            if not req.jd_path:
-                # Write jd_text to temp for HR scorer
-                with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp:
-                    tmp.write(jd_text)
-                    jd_tmp = tmp.name
-                try:
-                    hr_result_obj = hr_scorer.calculate_hr_score(file_path, jd_tmp)
-                finally:
-                    os.unlink(jd_tmp)
-            hr_result = hr_scorer.result_to_dict(hr_result_obj)
-        else:
-            # Text-based: write both to temp files for HR scorer
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp_r:
-                tmp_r.write(resume_text)
-                resume_tmp = tmp_r.name
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp_j:
-                tmp_j.write(jd_text)
-                jd_tmp = tmp_j.name
-            try:
-                hr_result_obj = hr_scorer.calculate_hr_score(resume_tmp, jd_tmp)
-                hr_result = hr_scorer.result_to_dict(hr_result_obj)
-            finally:
-                os.unlink(resume_tmp)
-                os.unlink(jd_tmp)
+    def _run_hr():
+        try:
+            hr_obj = hr_scorer.calculate_hr_score_from_text(resume_text, jd_text)
+            return hr_scorer.result_to_dict(hr_obj)
+        except Exception:
+            return {"overall_score": 0}
 
+    def _build_combined_result(ats_result: dict, hr_result: dict) -> dict:
         combined = {
             "ats": ats_result,
             "hr": hr_result,
             "summary": {
                 "ats_score": ats_result.get("total_score", 0),
                 "hr_score": hr_result.get("overall_score", 0),
-                "ats_rating": rating,
+                "ats_rating": ats_result.get("rating", ""),
                 "hr_recommendation": hr_result.get("recommendation", ""),
                 "overall_assessment": _overall_assessment(
                     ats_result.get("total_score", 0),
@@ -1012,18 +1048,64 @@ def score_both(req: ScoreRequest, api_key: str = Depends(verify_api_key_with_usa
                 ),
             },
         }
-
         if req.include_explanation:
             combined["explanation"] = {
                 "ats": generate_ats_explanation(resume_text, jd_text, ats_result),
                 "hr": generate_hr_explanation(hr_result),
             }
+        return combined
 
+    cache_key = _cache_key(resume_text, jd_text, "both")
+    if not req.include_explanation:
+        cached = _get_cached(cache_key)
+        if cached:
+            cached["_cached"] = True
+            if not stream_response:
+                return JSONResponse(content=cached)
+
+            async def _cached_stream():
+                yield _sse({"stage": "done", "pct": 100, "result": cached})
+
+            return StreamingResponse(_cached_stream(), media_type="text/event-stream")
+
+    if not stream_response:
+        try:
+            loop = asyncio.get_running_loop()
+            ats_fut = loop.run_in_executor(None, _run_ats)
+            hr_fut = loop.run_in_executor(None, _run_hr)
+            ats_result, hr_result = await asyncio.gather(ats_fut, hr_fut)
+            combined = _build_combined_result(ats_result, hr_result)
+            _set_cached(cache_key, combined)
+            return JSONResponse(content=combined)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def event_stream():
+        loop = asyncio.get_running_loop()
+        yield _sse({"stage": "scoring", "pct": 8})
+
+        # Submit both in parallel
+        ats_fut = loop.run_in_executor(None, _run_ats)
+        hr_fut  = loop.run_in_executor(None, _run_hr)
+
+        pct = 18
+        while not (ats_fut.done() and hr_fut.done()):
+            yield _sse({"stage": "scoring", "pct": min(pct, 80)})
+            await asyncio.sleep(5)
+            pct += 15
+
+        try:
+            ats_result = ats_fut.result()
+            hr_result  = hr_fut.result()
+        except Exception as exc:
+            yield _sse({"stage": "error", "detail": str(exc)})
+            return
+
+        combined = _build_combined_result(ats_result, hr_result)
         _set_cached(cache_key, combined)
-        return JSONResponse(content=combined)
+        yield _sse({"stage": "done", "pct": 100, "result": combined})
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.post("/score/batch")
@@ -1331,41 +1413,167 @@ async def score_llm(req: ScoreRequest, api_key: str = Depends(verify_api_key_wit
 
 
 @app.post("/score/combined")
-async def score_combined(req: ScoreRequest, api_key: str = Depends(verify_api_key_with_usage)):
-    """Score resume using all three scorers (ATS + HR + LLM) and return blended result."""
+async def score_combined(req: ScoreRequest, request: Request, api_key: str = Depends(verify_api_key_with_usage)):
+    """
+    ATS + HR + LLM scoring in one call.
+
+    Default response is JSON for existing web clients.
+    Set `Accept: text/event-stream` or `?stream=true` to receive SSE progress
+    events for long-running requests.
+    """
+    import json as _json
+
     req = _maybe_autofill_resume(req, api_key)
     resume_text, jd_text, resume_file_path = resolve_inputs(req)
+    domain_hint = req.domain_hint
+    stream_response = _wants_event_stream(request)
 
-    # Rules-based scores
-    ats_result = ats_scorer.calculate_ats_score(resume_text, jd_text, resume_file_path)
+    def _sse(obj: dict) -> str:
+        return f"data: {_json.dumps(obj)}\n\n"
+
+    def _run_ats():
+        return ats_scorer.calculate_ats_score(resume_text, jd_text, resume_file_path)
+
+    def _run_hr():
+        try:
+            return hr_scorer.calculate_hr_score_from_text(resume_text, jd_text)
+        except Exception:
+            return None
+
+    def _run_llm(rules_ats: float, rules_hr: float) -> dict:
+        try:
+            from llm_scorer import score_with_llm, combine_scores, ANTHROPIC_AVAILABLE
+            if ANTHROPIC_AVAILABLE:
+                llm_r = score_with_llm(resume_text, jd_text, domain_hint=domain_hint)
+                c_ats, c_hr, blend = combine_scores(rules_ats, rules_hr, llm_r)
+            else:
+                llm_r = {"ats_score": None, "hr_score": None, "error": "skipped"}
+                c_ats, c_hr, blend = rules_ats, rules_hr, {"method": "rules_only"}
+        except Exception as exc:
+            llm_r = {"error": str(exc)}
+            c_ats, c_hr, blend = rules_ats, rules_hr, {"method": "rules_only", "error": str(exc)}
+        return {"llm": llm_r, "combined_ats": c_ats, "combined_hr": c_hr, "blend": blend}
+
+    def _build_final(ats_result: dict, hr_result_obj, llm_holder: dict) -> dict:
+        rules_ats = ats_result.get("total_score", 0)
+        rules_hr = hr_result_obj.overall_score if hr_result_obj else 0
+        return {
+            "combined_ats": llm_holder.get("combined_ats", rules_ats),
+            "combined_hr": llm_holder.get("combined_hr", rules_hr),
+            "blend_details": llm_holder.get("blend", {"method": "rules_only"}),
+            "rules_ats": ats_result,
+            "rules_hr": hr_scorer.result_to_dict(hr_result_obj) if hr_result_obj else None,
+            "llm": llm_holder.get("llm", {"error": "skipped"}),
+        }
+
+    if not stream_response:
+        loop = asyncio.get_running_loop()
+        ats_fut = loop.run_in_executor(None, _run_ats)
+        hr_fut = loop.run_in_executor(None, _run_hr)
+        ats_result, hr_result_obj = await asyncio.gather(ats_fut, hr_fut)
+        rules_ats = ats_result.get("total_score", 0)
+        rules_hr = hr_result_obj.overall_score if hr_result_obj else 0
+        llm_holder = await loop.run_in_executor(None, lambda: _run_llm(rules_ats, rules_hr))
+        return JSONResponse(content=_build_final(ats_result, hr_result_obj, llm_holder))
+
+    async def event_stream():
+        loop = asyncio.get_running_loop()
+        yield _sse({"stage": "scoring", "pct": 8})
+
+        ats_fut = loop.run_in_executor(None, _run_ats)
+        hr_fut  = loop.run_in_executor(None, _run_hr)
+
+        pct = 15
+        while not (ats_fut.done() and hr_fut.done()):
+            yield _sse({"stage": "scoring", "pct": min(pct, 55)})
+            await asyncio.sleep(5)
+            pct += 12
+
+        ats_result = ats_fut.result()
+        hr_result_obj = hr_fut.result()
+        rules_ats = ats_result.get("total_score", 0)
+        rules_hr  = hr_result_obj.overall_score if hr_result_obj else 0
+
+        yield _sse({"stage": "llm_scoring", "pct": 62})
+
+        llm_fut = loop.run_in_executor(None, lambda: _run_llm(rules_ats, rules_hr))
+        pct = 65
+        while not llm_fut.done():
+            yield _sse({"stage": "llm_scoring", "pct": min(pct, 92)})
+            await asyncio.sleep(5)
+            pct += 8
+
+        llm_holder = llm_fut.result()
+        final = _build_final(ats_result, hr_result_obj, llm_holder)
+        yield _sse({"stage": "done", "pct": 100, "result": final})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/score/job-fit")
+async def score_job_fit(req: ScoreRequest, request: Request, api_key: str = Depends(verify_api_key_with_usage)):
+    """
+    Pre-application job fit screening.
+
+    Evaluates whether a JD is worth applying to by checking:
+    - Knockout disqualifiers (years of experience, certifications, visa)
+    - 7-dimension fit scoring (experience, skills, title, domain, education, certs, seniority)
+    - Gap analysis (fixable vs unfixable)
+
+    Zero API cost — all local NLP/SBERT. Runs in <5 seconds.
+    """
+    from job_fit_scorer import calculate_job_fit
+
+    req = _maybe_autofill_resume(req, api_key)
+    resume_text, jd_text, _ = resolve_inputs(req)
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, lambda: calculate_job_fit(resume_text, jd_text))
+
+    return JSONResponse(content=result.to_dict())
+
+
+@app.post("/coach/redflags")
+async def coach_redflags(req: RedFlagCoachRequest, auth=Depends(verify_api_key_with_usage)):
+    """LLM coach that diagnoses red flags, asks follow-up questions, and fixes the resume."""
+    if CLOUD_AVAILABLE and isinstance(auth, dict):
+        tier = auth.get("tier", "free")
+        if tier not in ("pro", "ultra"):
+            raise HTTPException(
+                status_code=403,
+                detail="Red-flag coaching requires a Pro ($12/month) or Ultra ($29/month) subscription.",
+            )
+
+    if not req.resume_text and CLOUD_AVAILABLE and isinstance(auth, dict):
+        record = _get_resume_db(auth["user_id"])
+        if record:
+            req = req.model_copy(update={"resume_text": record["resume_text"]})
+
+    if not req.resume_text:
+        raise HTTPException(status_code=400, detail="Provide resume_text or upload a resume via POST /resume/upload.")
+
+    _log_score_usage(auth, "/coach/redflags")
+
     try:
-        hr_result = hr_scorer.calculate_hr_score_from_text(resume_text, jd_text)
-    except Exception as _hr_err:
-        hr_result = None
+        from llm_scorer import coach_red_flags, ANTHROPIC_AVAILABLE
+    except ImportError:
+        raise HTTPException(status_code=500, detail="llm_scorer module not found")
 
-    rules_ats = ats_result.get('total_score', 0)
-    rules_hr = hr_result.overall_score if hr_result else 0
+    if not ANTHROPIC_AVAILABLE:
+        raise HTTPException(status_code=503, detail="LLM coaching unavailable — anthropic package not installed.")
 
-    # LLM score (optional — graceful degradation)
-    llm_result = {'ats_score': None, 'hr_score': None, 'error': 'skipped'}
-    try:
-        from llm_scorer import score_with_llm, combine_scores, ANTHROPIC_AVAILABLE
-        if ANTHROPIC_AVAILABLE:
-            llm_result = score_with_llm(resume_text, jd_text, domain_hint=req.domain_hint)
-            combined_ats, combined_hr, blend_details = combine_scores(rules_ats, rules_hr, llm_result)
-        else:
-            combined_ats, combined_hr, blend_details = rules_ats, rules_hr, {'method': 'rules_only'}
-    except Exception as e:
-        combined_ats, combined_hr, blend_details = rules_ats, rules_hr, {'method': 'rules_only', 'error': str(e)}
+    result = coach_red_flags(
+        resume_text=req.resume_text,
+        jd_text=req.jd_text,
+        score_context=req.score_context,
+        chat_history=req.chat_history,
+        domain_hint=req.domain_hint,
+    )
 
-    return {
-        'combined_ats': combined_ats,
-        'combined_hr': combined_hr,
-        'blend_details': blend_details,
-        'rules_ats': ats_result,
-        'rules_hr': hr_scorer.result_to_dict(hr_result) if hr_result else None,
-        'llm': llm_result
-    }
+    if result.get("error"):
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    return JSONResponse(content=result)
 
 
 # =============================================================================
@@ -1373,12 +1581,17 @@ async def score_combined(req: ScoreRequest, api_key: str = Depends(verify_api_ke
 # =============================================================================
 
 @app.post("/rewrite")
-async def rewrite_resume_endpoint(req: ScoreRequest, auth=Depends(verify_api_key_with_usage)):
+async def rewrite_resume_endpoint(req: ScoreRequest, request: Request, auth=Depends(verify_api_key_with_usage)):
     """
-    Rewrite resume to match JD, return before/after scores.
+    Rewrite resume to match JD.
+
+    Default response is JSON for existing web clients.
+    Set `Accept: text/event-stream` or `?stream=true` to receive SSE progress
+    events for long-running requests.
     Pro tier: 10 rewrites/month. Ultra tier: unlimited.
     """
-    # Enforce tier + rewrite limits
+    import json as _json
+
     if CLOUD_AVAILABLE and isinstance(auth, dict):
         tier = auth.get("tier", "free")
         user_id = auth.get("user_id")
@@ -1387,7 +1600,6 @@ async def rewrite_resume_endpoint(req: ScoreRequest, auth=Depends(verify_api_key
                 status_code=403,
                 detail="Resume rewriting requires a Pro ($12/month) or Ultra ($29/month) subscription.",
             )
-        # Pro users: check monthly rewrite limit
         if tier == "pro" and user_id:
             try:
                 from cloud.auth import check_rewrite_allowed
@@ -1398,48 +1610,70 @@ async def rewrite_resume_endpoint(req: ScoreRequest, auth=Depends(verify_api_key
                         detail=f"Monthly rewrite limit reached ({rewrite_status['limit']}/month for Pro). Upgrade to Ultra for unlimited rewrites.",
                     )
             except ImportError:
-                pass  # Local mode — no limits
+                pass
 
     req = _maybe_autofill_resume(req, auth)
     resume_text, jd_text, resume_file_path = resolve_inputs(req)
     _log_score_usage(auth, "/rewrite")
 
-    try:
-        # 1. Score the original resume
-        original_ats = ats_scorer.calculate_ats_score(resume_text, jd_text, resume_file_path)
+    domain_hint = req.domain_hint
+    format_style = req.format_style or "ats"
+    stream_response = _wants_event_stream(request)
+
+    from llm_scorer import rewrite_resume as _rewrite_fn, ANTHROPIC_AVAILABLE
+
+    def _sse(obj: dict) -> str:
+        return f"data: {_json.dumps(obj)}\n\n"
+
+    def _score_original():
+        o_ats = ats_scorer.calculate_ats_score(resume_text, jd_text, resume_file_path)
         try:
-            original_hr_obj = hr_scorer.calculate_hr_score_from_text(resume_text, jd_text)
-            original_hr = hr_scorer.result_to_dict(original_hr_obj)
+            o_hr_obj = hr_scorer.calculate_hr_score_from_text(resume_text, jd_text)
+            o_hr = hr_scorer.result_to_dict(o_hr_obj)
         except Exception:
-            original_hr = {"overall_score": 0}
+            o_hr = {"overall_score": 0}
+        return o_ats, o_hr
 
-        # 2. Rewrite via LLM
-        from llm_scorer import rewrite_resume, ANTHROPIC_AVAILABLE
-        if not ANTHROPIC_AVAILABLE:
-            raise HTTPException(status_code=503, detail="LLM rewriting unavailable — anthropic package not installed.")
+    def _do_rewrite():
+        return _rewrite_fn(resume_text, jd_text, domain_hint=domain_hint, format_style=format_style)
 
-        rewrite_result = rewrite_resume(resume_text, jd_text, domain_hint=req.domain_hint)
-
-        if rewrite_result.get("error") or not rewrite_result.get("rewritten_resume"):
-            raise HTTPException(
-                status_code=500,
-                detail=rewrite_result.get("error", "Rewrite failed — no output returned."),
-            )
-
-        rewritten_text = rewrite_result["rewritten_resume"]
-
-        # 3. Score the rewritten resume
-        rewritten_ats = ats_scorer.calculate_ats_score(rewritten_text, jd_text)
+    def _score_rewritten(rewritten_text: str):
+        r_ats = ats_scorer.calculate_ats_score(rewritten_text, jd_text)
         try:
-            rewritten_hr_obj = hr_scorer.calculate_hr_score_from_text(rewritten_text, jd_text)
-            rewritten_hr = hr_scorer.result_to_dict(rewritten_hr_obj)
+            r_hr_obj = hr_scorer.calculate_hr_score_from_text(rewritten_text, jd_text)
+            r_hr = hr_scorer.result_to_dict(r_hr_obj)
         except Exception:
-            rewritten_hr = {"overall_score": 0}
+            r_hr = {"overall_score": 0}
+        return r_ats, r_hr
+
+    def _score_llm(rewritten_text: str) -> dict:
+        try:
+            from llm_scorer import score_with_llm as _llm_score_fn, ANTHROPIC_AVAILABLE as _AA
+            if _AA:
+                return _llm_score_fn(rewritten_text, jd_text, domain_hint=domain_hint)
+        except Exception:
+            pass
+        return {"error": "skipped"}
+
+    def _build_final_result(original_ats: dict, original_hr: dict, rewrite_result: dict, rewritten_ats: dict, rewritten_hr: dict, rewritten_llm: dict) -> dict:
+        rewritten_text = rewrite_result.get("rewritten_resume", "")
+        import re as _re
+        _rewritten_bullets = _re.findall(r'[•\-]\s*(.+)', rewritten_text)
+        try:
+            _bst_score, _bst_stats = hr_scorer.score_burstiness(_rewritten_bullets)
+            writing_quality = {
+                **_bst_stats,
+                'burstiness_score': _bst_score,
+                'quantification_rate': rewritten_hr.get("writing_quality", {}).get("quantification_rate", 0),
+            }
+        except Exception:
+            writing_quality = {}
 
         return {
             "rewritten_resume": rewritten_text,
             "changes_made": rewrite_result.get("changes_made", []),
             "explanation": rewrite_result.get("explanation", ""),
+            "format_style": format_style,
             "original_scores": {
                 "ats": original_ats.get("total_score", 0),
                 "hr": original_hr.get("overall_score", 0),
@@ -1447,14 +1681,96 @@ async def rewrite_resume_endpoint(req: ScoreRequest, auth=Depends(verify_api_key
             "rewritten_scores": {
                 "ats": rewritten_ats.get("total_score", 0),
                 "hr": rewritten_hr.get("overall_score", 0),
+                "llm_ats": rewritten_llm.get("ats_score") or 0,
+                "llm_hr": rewritten_llm.get("hr_score") or 0,
             },
+            "writing_quality": writing_quality,
             "model_used": rewrite_result.get("model_used", "claude-sonnet-4-6"),
         }
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Rewrite failed: {str(e)}")
+    if not ANTHROPIC_AVAILABLE:
+        if not stream_response:
+            raise HTTPException(status_code=503, detail="LLM rewriting unavailable — anthropic package not installed.")
+
+        async def _error_stream():
+            yield _sse({"stage": "error", "detail": "LLM rewriting unavailable — anthropic package not installed."})
+
+        return StreamingResponse(_error_stream(), media_type="text/event-stream")
+
+    if not stream_response:
+        loop = asyncio.get_running_loop()
+        original_ats, original_hr = await loop.run_in_executor(None, _score_original)
+        rewrite_result = await loop.run_in_executor(None, _do_rewrite)
+        if rewrite_result.get("error") or not rewrite_result.get("rewritten_resume"):
+            raise HTTPException(status_code=500, detail=rewrite_result.get("error", "Rewrite failed — no output returned."))
+        rewritten_text = rewrite_result["rewritten_resume"]
+        rewritten_ats, rewritten_hr = await loop.run_in_executor(None, lambda: _score_rewritten(rewritten_text))
+        rewritten_llm = {"error": "skipped"}
+        if req.include_llm_score:
+            rewritten_llm = await loop.run_in_executor(None, lambda: _score_llm(rewritten_text))
+        final_result = _build_final_result(original_ats, original_hr, rewrite_result, rewritten_ats, rewritten_hr, rewritten_llm)
+        return JSONResponse(content=final_result)
+
+    async def event_stream():
+        loop = asyncio.get_running_loop()
+
+        yield _sse({"stage": "scoring_original", "pct": 8})
+        orig_future = loop.run_in_executor(None, _score_original)
+        while not orig_future.done():
+            await asyncio.sleep(1)
+
+        try:
+            original_ats, original_hr = orig_future.result()
+        except Exception as exc:
+            yield _sse({"stage": "error", "detail": f"Scoring original failed: {exc}"})
+            return
+
+        yield _sse({"stage": "rewriting", "pct": 22})
+        rewrite_future = loop.run_in_executor(None, _do_rewrite)
+        pct = 28
+        while not rewrite_future.done():
+            yield _sse({"stage": "rewriting", "pct": min(pct, 75)})
+            await asyncio.sleep(5)
+            pct += 6
+
+        try:
+            rewrite_result = rewrite_future.result()
+        except Exception as exc:
+            yield _sse({"stage": "error", "detail": f"Rewrite failed: {exc}"})
+            return
+
+        if rewrite_result.get("error") or not rewrite_result.get("rewritten_resume"):
+            yield _sse({"stage": "error", "detail": rewrite_result.get("error", "Rewrite failed — no output returned.")})
+            return
+
+        rewritten_text = rewrite_result["rewritten_resume"]
+
+        yield _sse({"stage": "scoring_rewritten", "pct": 82})
+        rescore_future = loop.run_in_executor(None, lambda: _score_rewritten(rewritten_text))
+        while not rescore_future.done():
+            await asyncio.sleep(1)
+
+        try:
+            rewritten_ats, rewritten_hr = rescore_future.result()
+        except Exception as exc:
+            yield _sse({"stage": "error", "detail": f"Scoring rewritten resume failed: {exc}"})
+            return
+
+        rewritten_llm: dict = {"error": "skipped"}
+        if req.include_llm_score:
+            yield _sse({"stage": "scoring_llm", "pct": 88})
+            llm_score_future = loop.run_in_executor(None, lambda: _score_llm(rewritten_text))
+            _llm_pct = 90
+            while not llm_score_future.done():
+                yield _sse({"stage": "scoring_llm", "pct": min(_llm_pct, 97)})
+                await asyncio.sleep(3)
+                _llm_pct += 3
+            rewritten_llm = llm_score_future.result()
+
+        final_result = _build_final_result(original_ats, original_hr, rewrite_result, rewritten_ats, rewritten_hr, rewritten_llm)
+        yield _sse({"stage": "done", "pct": 100, "result": final_result})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 # =============================================================================
@@ -1641,6 +1957,115 @@ def fetch_jd_endpoint(req: FetchJDRequest, api_key=Depends(verify_api_key)):
         "char_count": len(jd_text),
         "raw_char_count": len(raw_text),
     }
+
+
+# =============================================================================
+# JOB APPLICATION TRACKER
+# =============================================================================
+
+@app.post("/tracker/add")
+def tracker_add(req: TrackerAddRequest, auth=Depends(verify_api_key)):
+    """Save a job application to the user's tracker."""
+    user_id = _get_user_id(auth)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Authentication required to use the tracker.")
+    if not CLOUD_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Tracker unavailable — cloud auth not configured.")
+    from cloud.auth import get_db
+    with get_db() as conn:
+        cur = conn.execute(
+            """INSERT INTO job_applications
+               (user_id, company, job_title, status, resume_file, cover_letter_file,
+                ats_score, hr_score, llm_score, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, req.company, req.job_title, req.status,
+             req.resume_file, req.cover_letter_file,
+             req.ats_score, req.hr_score, req.llm_score, req.notes),
+        )
+        return {"id": cur.lastrowid, "status": "added"}
+
+
+@app.get("/tracker")
+def tracker_list(auth=Depends(verify_api_key)):
+    """Return all job applications for the authenticated user, newest first."""
+    user_id = _get_user_id(auth)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    if not CLOUD_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Tracker unavailable.")
+    from cloud.auth import get_db
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT id, company, job_title, status, resume_file, cover_letter_file,
+                      ats_score, hr_score, llm_score, notes, created_at, updated_at
+               FROM job_applications WHERE user_id = ?
+               ORDER BY created_at DESC""",
+            (user_id,),
+        ).fetchall()
+    return {"applications": [dict(r) for r in rows]}
+
+
+@app.put("/tracker/{entry_id}")
+def tracker_update(entry_id: int, req: TrackerUpdateRequest, auth=Depends(verify_api_key)):
+    """Update status / notes for a tracker entry owned by the user."""
+    user_id = _get_user_id(auth)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    if not CLOUD_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Tracker unavailable.")
+    from cloud.auth import get_db
+    updates = {}
+    if req.status is not None:
+        updates["status"] = req.status
+    if req.notes is not None:
+        updates["notes"] = req.notes
+    if req.resume_file is not None:
+        updates["resume_file"] = req.resume_file
+    if req.cover_letter_file is not None:
+        updates["cover_letter_file"] = req.cover_letter_file
+    if not updates:
+        return {"status": "no_change"}
+    updates["updated_at"] = "datetime('now')"
+    set_clause = ", ".join(
+        f"{k} = datetime('now')" if k == "updated_at" else f"{k} = ?"
+        for k in updates
+    )
+    values = [v for k, v in updates.items() if k != "updated_at"]
+    values += [entry_id, user_id]
+    with get_db() as conn:
+        conn.execute(
+            f"UPDATE job_applications SET {set_clause} WHERE id = ? AND user_id = ?",
+            values,
+        )
+    return {"status": "updated"}
+
+
+@app.delete("/tracker/{entry_id}")
+def tracker_delete(entry_id: int, auth=Depends(verify_api_key)):
+    """Delete a tracker entry owned by the user."""
+    user_id = _get_user_id(auth)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    if not CLOUD_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Tracker unavailable.")
+    from cloud.auth import get_db
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM job_applications WHERE id = ? AND user_id = ?",
+            (entry_id, user_id),
+        )
+    return {"status": "deleted"}
+
+
+def _get_user_id(auth) -> Optional[int]:
+    """Extract integer user_id from auth dict (JWT/API-key result)."""
+    if not isinstance(auth, dict):
+        return None
+    uid = auth.get("user_id")
+    try:
+        return int(uid) if uid is not None else None
+    except (ValueError, TypeError):
+        return None
 
 
 # =============================================================================
