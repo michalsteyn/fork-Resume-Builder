@@ -28,7 +28,7 @@ from pii_redactor import redact_text
 def score_with_llm(
     resume_text: str,
     jd_text: str,
-    model: str = "claude-sonnet-4-6",
+    model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
     temperature: float = 0.0,
     domain_hint: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -205,7 +205,7 @@ RESUME:
 def rewrite_resume(
     resume_text: str,
     jd_text: str,
-    model: str = "claude-sonnet-4-6",
+    model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
     temperature: float = 0.3,
     domain_hint: Optional[str] = None,
     format_style: Optional[str] = None,
@@ -429,7 +429,7 @@ def coach_red_flags(
     jd_text: str,
     score_context: Optional[Dict[str, Any]] = None,
     chat_history: Optional[List[Dict[str, str]]] = None,
-    model: str = "claude-sonnet-4-6",
+    model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
     temperature: float = 0.3,
     domain_hint: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -585,7 +585,7 @@ def generate_cover_letter(
     jd_text: str,
     company_name: str = "",
     job_title: str = "",
-    model: str = "claude-sonnet-4-6",
+    model: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
     temperature: float = 0.4,
 ) -> Dict[str, Any]:
     """
@@ -764,7 +764,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='LLM-Augmented Resume Scorer')
     parser.add_argument('resume_path', help='Path to resume file')
     parser.add_argument('jd_path', help='Path to job description file')
-    parser.add_argument('--model', default='claude-sonnet-4-6', help='Claude model to use')
+    parser.add_argument('--model', default=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"), help='Model to use (overrides ANTHROPIC_MODEL env var)')
     parser.add_argument('--json', action='store_true', help='Output raw JSON')
     parser.add_argument('--domain', help='Domain hint (clinical_research, pharma_biotech, etc.)')
 

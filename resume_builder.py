@@ -238,7 +238,7 @@ Instructions:
 CRITICAL CONSTRAINT: Do not invent experience or credentials. Only reframe and highlight existing experience using the JD's terminology."""
 
     message = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
         max_tokens=4000,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -287,7 +287,7 @@ Format Requirements:
 Output the complete cover letter text only, ready to be formatted."""
 
     message = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
         max_tokens=2000,
         messages=[{"role": "user", "content": prompt}]
     )
