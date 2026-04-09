@@ -215,6 +215,16 @@ class FetchJDRequest(BaseModel):
     use_ai: bool = Field(True, description="Use Claude Haiku to clean/extract JD from raw page text")
 
 
+class JdExtractRequest(BaseModel):
+    """JD-only extraction for ATS keywords and structured requirements (no resume required)."""
+
+    jd_text: str = Field(..., description="Full job description plain text or markdown")
+    domain_hint: Optional[str] = Field(
+        None,
+        description="Optional domain override for extract_jd_keywords (e.g. technology, clinical_research)",
+    )
+
+
 class ResumeUploadRequest(BaseModel):
     """Upload or replace the authenticated user's saved resume."""
     resume_text: Optional[str] = Field(None, description="Plain text resume content")
@@ -796,6 +806,50 @@ def health():
         "cache_size": len(_score_cache),
         "auth_required": _config["require_auth"],
     }
+
+
+@app.post("/jd/extract")
+def jd_extract(req: JdExtractRequest, api_key: str = Depends(verify_api_key_with_usage)):
+    """
+    Extract ATS-oriented keyword lists and rule-based JD requirements without scoring a resume.
+
+    Uses ats_scorer.extract_jd_keywords, detect_domain, job_fit_scorer.extract_requirements,
+    and hr_scorer.parse_job_description.
+    """
+    from dataclasses import asdict
+
+    from job_fit_scorer import extract_requirements
+
+    jd_text = (req.jd_text or "").strip()
+    if len(jd_text) < 50:
+        raise HTTPException(status_code=400, detail="jd_text too short (minimum ~50 characters)")
+
+    _log_score_usage(api_key, "/jd/extract")
+
+    try:
+        domain_override = req.domain_hint.strip() if req.domain_hint else None
+        primary, confidence, domain_scores = ats_scorer.detect_domain(jd_text)
+        domain_for_keywords = domain_override or primary
+        jd_kw = ats_scorer.extract_jd_keywords(jd_text, domain=domain_for_keywords)
+        req_fit = extract_requirements(jd_text)
+        jd_hr = hr_scorer.parse_job_description(jd_text)
+
+        scores_json = {k: float(v) for k, v in domain_scores.items()}
+
+        return JSONResponse(
+            content={
+                "source": "resume-builder",
+                "domain": primary,
+                "domain_confidence": float(confidence),
+                "domain_scores": scores_json,
+                "domain_used_for_keywords": domain_for_keywords,
+                "jd_keywords": jd_kw,
+                "extracted_requirements": asdict(req_fit),
+                "job_requirements_hr": asdict(jd_hr),
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/score/ats")
